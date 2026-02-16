@@ -2,7 +2,7 @@
 State schema for the Cloud Migration Agent Platform.
 
 Defines the complete state structure that flows through all 6 phases
-of the migration workflow.
+of the migration workflow. Aligned with spec v4.0.0.
 """
 
 from typing import Dict, List, Optional, Any, Literal
@@ -12,7 +12,6 @@ from enum import Enum
 
 
 class PhaseStatus(str, Enum):
-    """Phase execution status"""
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
@@ -23,14 +22,12 @@ class PhaseStatus(str, Enum):
 
 
 class ReviewDecision(str, Enum):
-    """Review gate decisions"""
     APPROVE = "approve"
     REQUEST_CHANGES = "request_changes"
     REJECT = "reject"
 
 
 class ImplementationStrategy(str, Enum):
-    """Implementation pathway options"""
     PRE_PACKAGED = "pre_packaged"
     DYNAMIC_TERRAFORM = "dynamic_terraform"
     THIRD_PARTY = "third_party"
@@ -38,17 +35,15 @@ class ImplementationStrategy(str, Enum):
 
 # Phase 1: Discovery Models
 class DiscoveredService(BaseModel):
-    """Discovered cloud service"""
-    service_name: str
-    provider: str  # AWS, Azure, GCP, On-Prem
-    resource_type: str
-    configuration: Dict[str, Any]
+    service_name: str = ""
+    provider: str = ""
+    resource_type: str = ""
+    configuration: Dict[str, Any] = Field(default_factory=dict)
     dependencies: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class NetworkArchitecture(BaseModel):
-    """Network topology"""
     vpcs: List[Dict[str, Any]] = Field(default_factory=list)
     subnets: List[Dict[str, Any]] = Field(default_factory=list)
     security_groups: List[Dict[str, Any]] = Field(default_factory=list)
@@ -57,27 +52,24 @@ class NetworkArchitecture(BaseModel):
 
 
 class ComputeResource(BaseModel):
-    """Compute instance details"""
-    instance_id: str
-    instance_type: str
-    vcpus: int
-    memory_gb: float
-    storage_gb: float
-    os: str
+    instance_id: str = ""
+    instance_type: str = ""
+    vcpus: int = 0
+    memory_gb: float = 0.0
+    storage_gb: float = 0.0
+    os: str = ""
     tags: Dict[str, str] = Field(default_factory=dict)
 
 
 class StorageResource(BaseModel):
-    """Storage resource details"""
-    resource_id: str
-    storage_type: str  # S3, EBS, RDS, etc.
-    size_gb: float
+    resource_id: str = ""
+    storage_type: str = ""
+    size_gb: float = 0.0
     iops: Optional[int] = None
     throughput_mbps: Optional[int] = None
 
 
 class SecurityPosture(BaseModel):
-    """Security configuration"""
     iam_roles: List[Dict[str, Any]] = Field(default_factory=list)
     policies: List[Dict[str, Any]] = Field(default_factory=list)
     encryption: Dict[str, Any] = Field(default_factory=dict)
@@ -85,15 +77,13 @@ class SecurityPosture(BaseModel):
 
 
 class Gap(BaseModel):
-    """Missing or ambiguous information"""
-    category: str
-    description: str
-    severity: Literal["low", "medium", "high"]
-    clarification_question: str
+    category: str = ""
+    description: str = ""
+    severity: Literal["low", "medium", "high"] = "medium"
+    clarification_question: str = ""
 
 
 class DiscoveryState(BaseModel):
-    """Phase 1: Discovery state"""
     discovered_services: List[DiscoveredService] = Field(default_factory=list)
     network_architecture: Optional[NetworkArchitecture] = None
     compute_resources: List[ComputeResource] = Field(default_factory=list)
@@ -103,58 +93,55 @@ class DiscoveryState(BaseModel):
     discovery_confidence: float = 0.0
     clarifications_requested: List[str] = Field(default_factory=list)
     clarifications_received: Dict[str, str] = Field(default_factory=dict)
+    kb_intelligence: Dict[str, Any] = Field(default_factory=dict)
 
 
 # Phase 2: Analysis Models
 class OCIServiceMapping(BaseModel):
-    """Source to OCI service mapping"""
-    source_service: str
-    oci_service: str
-    mapping_confidence: float
+    source_service: str = ""
+    oci_service: str = ""
+    mapping_confidence: float = 0.0
     alternatives: List[str] = Field(default_factory=list)
     reasoning: str = ""
 
 
 class ArchHubReference(BaseModel):
-    """ArchHub reference architecture"""
-    architecture_id: str
-    title: str
-    description: str
-    diagram_url: str
-    components: List[str]
-    match_score: float
+    architecture_id: str = ""
+    title: str = ""
+    description: str = ""
+    diagram_url: str = ""
+    components: List[str] = Field(default_factory=list)
+    match_score: float = 0.0
 
 
 class LiveLabsWorkshop(BaseModel):
-    """LiveLabs workshop recommendation"""
-    workshop_id: str
-    title: str
-    description: str
-    url: str
-    relevance_score: float
-    topics: List[str]
+    workshop_id: str = ""
+    title: str = ""
+    description: str = ""
+    url: str = ""
+    relevance_score: float = 0.0
+    topics: List[str] = Field(default_factory=list)
 
 
 class SizingRecommendation(BaseModel):
-    """Resource sizing recommendation"""
-    resource_type: str
-    recommended_shape: str
-    vcpus: int
-    memory_gb: float
-    storage_gb: float
-    rationale: str
+    resource_type: str = ""
+    recommended_shape: str = ""
+    vcpus: int = 0
+    memory_gb: float = 0.0
+    storage_gb: float = 0.0
+    rationale: str = ""
 
 
 class PricingEstimate(BaseModel):
-    """Cost estimation"""
-    resource_name: str
-    monthly_cost_usd: float
-    annual_cost_usd: float
-    cost_breakdown: Dict[str, float]
+    resource_name: str = ""
+    monthly_cost_usd: float = 0.0
+    annual_cost_usd: float = 0.0
+    cost_breakdown: Dict[str, float] = Field(default_factory=dict)
 
 
 class AnalysisState(BaseModel):
-    """Phase 2: Analysis state"""
+    current_state: Dict[str, Any] = Field(default_factory=dict)
+    requirements: Dict[str, Any] = Field(default_factory=dict)
     service_mappings: List[OCIServiceMapping] = Field(default_factory=list)
     archhub_references: List[ArchHubReference] = Field(default_factory=list)
     livelabs_workshops: List[LiveLabsWorkshop] = Field(default_factory=list)
@@ -162,103 +149,110 @@ class AnalysisState(BaseModel):
     pricing_estimates: List[PricingEstimate] = Field(default_factory=list)
     total_monthly_cost_usd: float = 0.0
     total_annual_cost_usd: float = 0.0
+    target_design: Dict[str, Any] = Field(default_factory=dict)
+    savings_analysis: Dict[str, Any] = Field(default_factory=dict)
+    kb_intelligence: Dict[str, Any] = Field(default_factory=dict)
 
 
 # Phase 3: Design Models
 class ArchitectureComponent(BaseModel):
-    """Architecture component in design"""
-    component_id: str
-    component_type: str
-    name: str
-    oci_service: str
-    configuration: Dict[str, Any]
+    component_id: str = ""
+    component_type: str = ""
+    name: str = ""
+    oci_service: str = ""
+    configuration: Dict[str, Any] = Field(default_factory=dict)
     dependencies: List[str] = Field(default_factory=list)
     deployment_order: int = 0
+    state: str = "pending"
 
 
 class DesignDiagram(BaseModel):
-    """Architecture diagram"""
-    diagram_type: Literal["logical", "sequence", "gantt", "network"]
-    diagram_data: str  # Base64 encoded image or mermaid/graphviz code
-    format: Literal["png", "svg", "mermaid", "graphviz"]
+    diagram_type: Literal["logical", "sequence", "gantt", "network", "swimlane"] = "logical"
+    diagram_data: str = ""
+    format: Literal["png", "svg", "mermaid", "graphviz"] = "mermaid"
 
 
 class DesignState(BaseModel):
-    """Phase 3: Design state"""
     architecture_components: List[ArchitectureComponent] = Field(default_factory=list)
     component_dependencies: Dict[str, List[str]] = Field(default_factory=dict)
-    deployment_sequence: List[str] = Field(default_factory=list)  # Topologically sorted
+    deployment_sequence: List[str] = Field(default_factory=list)
     diagrams: List[DesignDiagram] = Field(default_factory=list)
     design_validated: bool = False
+    design_architecture_json: str = ""
+    design_summary: str = ""
+    design_component_count: int = 0
+    design_validation_results: Dict[str, Any] = Field(default_factory=dict)
+    design_build_plan: List[str] = Field(default_factory=list)
+    design_status: str = "not_started"
+    kb_intelligence: Dict[str, Any] = Field(default_factory=dict)
 
 
 # Phase 4: Review Models
 class ReviewFeedback(BaseModel):
-    """Review feedback item"""
     component_id: Optional[str] = None
-    feedback_type: Literal["change_request", "question", "concern", "approval"]
-    description: str
-    priority: Literal["low", "medium", "high"]
+    feedback_type: Literal["change_request", "question", "concern", "approval"] = "concern"
+    description: str = ""
+    priority: Literal["low", "medium", "high", "critical"] = "medium"
     resolved: bool = False
 
 
 class ReviewState(BaseModel):
-    """Phase 4: Review state"""
     feedback_items: List[ReviewFeedback] = Field(default_factory=list)
     review_iterations: int = 0
     approval_score: float = 0.0
     final_approved: bool = False
+    validation_results: Dict[str, Any] = Field(default_factory=dict)
+    kb_intelligence: Dict[str, Any] = Field(default_factory=dict)
 
 
 # Phase 5: Implementation Models
 class TerraformModule(BaseModel):
-    """Terraform module"""
-    module_name: str
-    source: str
-    version: str
-    variables: Dict[str, Any]
+    module_name: str = ""
+    source: str = ""
+    version: str = ""
+    variables: Dict[str, Any] = Field(default_factory=dict)
     outputs: Dict[str, Any] = Field(default_factory=dict)
 
 
 class GeneratedCode(BaseModel):
-    """Generated Terraform code"""
-    file_path: str
-    content: str
-    module_type: str
+    file_path: str = ""
+    content: str = ""
+    module_type: str = ""
     validated: bool = False
     validation_errors: List[str] = Field(default_factory=list)
 
 
 class ImplementationState(BaseModel):
-    """Phase 5: Implementation state"""
     strategy: Optional[ImplementationStrategy] = None
     terraform_modules: List[TerraformModule] = Field(default_factory=list)
     generated_code: List[GeneratedCode] = Field(default_factory=list)
     code_validated: bool = False
     project_exported: bool = False
     export_path: Optional[str] = None
+    selected_component: Optional[Dict[str, Any]] = None
+    framework_artifacts: Optional[Dict[str, Any]] = None
+    import_path: Optional[str] = None
+    import_validated: bool = False
+    kb_intelligence: Dict[str, Any] = Field(default_factory=dict)
 
 
 # Phase 6: Deployment Models
 class ValidationResult(BaseModel):
-    """Validation check result"""
-    check_name: str
-    passed: bool
-    details: str
-    severity: Literal["info", "warning", "error"]
+    check_name: str = ""
+    passed: bool = False
+    details: str = ""
+    severity: Literal["info", "warning", "error"] = "info"
 
 
 class DeploymentJob(BaseModel):
-    """OCI RM deployment job"""
-    job_id: str
-    status: str
-    created_at: datetime
+    job_id: str = ""
+    status: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = None
     logs: List[str] = Field(default_factory=list)
 
 
 class DeploymentState(BaseModel):
-    """Phase 6: Deployment state"""
     stack_id: Optional[str] = None
     stack_name: Optional[str] = None
     pre_validation_results: List[ValidationResult] = Field(default_factory=list)
@@ -268,26 +262,57 @@ class DeploymentState(BaseModel):
     post_validation_results: List[ValidationResult] = Field(default_factory=list)
     deployment_successful: bool = False
     deployment_report_path: Optional[str] = None
+    deployment_artifacts: Dict[str, Any] = Field(default_factory=dict)
+    deployment_status: str = "not_started"
+    kb_intelligence: Dict[str, Any] = Field(default_factory=dict)
+
+
+# On-Demand Feature Models
+class RiskItem(BaseModel):
+    category: str = ""
+    risk_name: str = ""
+    description: str = ""
+    severity: Literal["low", "medium", "high", "critical"] = "medium"
+    probability: Literal["low", "medium", "high"] = "medium"
+    impact: Literal["low", "medium", "high"] = "medium"
+    mitigation: str = ""
+    risk_score: float = 0.0
+
+
+class CostOptimization(BaseModel):
+    optimization_type: str = ""
+    description: str = ""
+    potential_savings_pct: float = 0.0
+    potential_savings_usd: float = 0.0
+    effort: Literal["low", "medium", "high"] = "medium"
+    risk_level: Literal["low", "medium", "high"] = "low"
+
+
+class OnDemandState(BaseModel):
+    risk_analysis: List[RiskItem] = Field(default_factory=list)
+    overall_risk_score: float = 0.0
+    cost_optimizations: List[CostOptimization] = Field(default_factory=list)
+    total_potential_savings_usd: float = 0.0
+    kb_query_history: List[Dict[str, Any]] = Field(default_factory=list)
+    mcp_health: Dict[str, Any] = Field(default_factory=dict)
 
 
 # Main Migration State
 class MigrationState(BaseModel):
-    """Complete migration workflow state"""
-    
     # Metadata
-    migration_id: str
+    migration_id: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     current_phase: str = "discovery"
     phase_status: PhaseStatus = PhaseStatus.PENDING
-    
+
     # Input Context
     user_context: str = ""
     uploaded_documents: List[str] = Field(default_factory=list)
     bom_file: Optional[str] = None
-    source_provider: str = ""  # AWS, Azure, GCP, On-Prem
+    source_provider: str = ""
     target_region: str = "us-ashburn-1"
-    
+
     # Phase States
     discovery: DiscoveryState = Field(default_factory=DiscoveryState)
     analysis: AnalysisState = Field(default_factory=AnalysisState)
@@ -295,43 +320,52 @@ class MigrationState(BaseModel):
     review: ReviewState = Field(default_factory=ReviewState)
     implementation: ImplementationState = Field(default_factory=ImplementationState)
     deployment: DeploymentState = Field(default_factory=DeploymentState)
-    
+    on_demand: OnDemandState = Field(default_factory=OnDemandState)
+
     # Review Gates
     discovery_review_decision: Optional[ReviewDecision] = None
     discovery_review_feedback: str = ""
+    discovery_review_status: str = "pending"
     archhub_review_decision: Optional[ReviewDecision] = None
     archhub_review_feedback: str = ""
+    archhub_review_status: str = "pending"
     livelabs_review_decision: Optional[ReviewDecision] = None
     livelabs_review_feedback: str = ""
+    livelabs_review_status: str = "pending"
     design_review_decision: Optional[ReviewDecision] = None
     design_review_feedback: str = ""
+    design_review_status: str = "pending"
+    review_status: str = "pending"
+    review_feedback: str = ""
     code_review_decision: Optional[ReviewDecision] = None
     code_review_feedback: str = ""
+    import_review_decision: Optional[ReviewDecision] = None
+    import_review_feedback: str = ""
+    implementation_review_decision: Optional[ReviewDecision] = None
+    implementation_review_feedback: str = ""
+    pre_deployment_review_decision: Optional[ReviewDecision] = None
+    pre_deployment_review_feedback: str = ""
     plan_review_decision: Optional[ReviewDecision] = None
     plan_review_feedback: str = ""
-    
+
     # Messages and Errors
     messages: List[Dict[str, str]] = Field(default_factory=list)
     errors: List[str] = Field(default_factory=list)
-    
-    # Feature Flags (for on-demand features)
+
+    # Feature Flags
     risk_analysis_requested: bool = False
     cost_optimization_requested: bool = False
-    
+
     class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+        json_encoders = {datetime: lambda v: v.isoformat()}
 
 
-# Helper function to create a new migration state
 def create_migration_state(
     migration_id: str,
     user_context: str,
     source_provider: str,
     target_region: str = "us-ashburn-1"
 ) -> MigrationState:
-    """Create a new migration state with initial values"""
     return MigrationState(
         migration_id=migration_id,
         user_context=user_context,
