@@ -231,8 +231,10 @@ cloud-migration-agent/
 
 | Symptom | Fix |
 |---------|-----|
-| `ModuleNotFoundError: No module named 'gradio'` | `pip install gradio requests` |
+| `ModuleNotFoundError: No module named 'gradio'` | `pip install "gradio>=4.44.0,<5.0.0" requests` |
 | UI shows "Connection error" | Ensure `python main.py api` is running first |
 | `OCI SDK auth error` | Check `.env` credentials and that your OCI key file exists |
-| `TypeError: expected str … FieldInfo` | Pydantic-settings mismatch — run `pip install pydantic-settings==2.5.2` |
+| `TypeError: expected str … FieldInfo` | Pydantic-settings mismatch — run `pip install "pydantic-settings>=2.5.2"` |
+| `No matching distribution found for mcp==0.9.0` | Fixed in `requirements.txt` — now uses `mcp>=1.0.0` |
+| `cx-Oracle` install fails on Python 3.12 | Removed from `requirements.txt`; use `oracledb` instead |
 | Tests fail | Run `python test_new_components.py` — no OCI credentials needed |
