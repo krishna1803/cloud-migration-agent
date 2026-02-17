@@ -23,6 +23,7 @@ class OCIConfig(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 class GenAIConfig(BaseSettings):
@@ -42,6 +43,7 @@ class GenAIConfig(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 class DatabaseConfig(BaseSettings):
@@ -60,6 +62,7 @@ class DatabaseConfig(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 class AppConfig(BaseSettings):
@@ -101,6 +104,7 @@ class AppConfig(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 class MCPConfig(BaseSettings):
@@ -119,6 +123,7 @@ class MCPConfig(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 class APIConfig(BaseSettings):
@@ -130,6 +135,7 @@ class APIConfig(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 class UIConfig(BaseSettings):
@@ -141,6 +147,7 @@ class UIConfig(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 class Config:
