@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env.local
+
+# Environment variables (keep .env.example, ignore real secrets)
+.env
+
+# IDE / editor
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Uploads / exports / checkpoints (runtime data)
+uploads/
+exports/
+checkpoints/
+
+# Logs
+*.log
+logs/
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+.terraform/
