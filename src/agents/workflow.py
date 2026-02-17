@@ -57,7 +57,15 @@ from src.agents.phase5_implementation import (
     terraform_module_definition,
     terraform_code_generation,
     code_validation,
-    project_export
+    project_export,
+    component_selection,
+    component_configuration,
+    project_import,
+    import_validation,
+    framework_selection,
+    framework_configuration,
+    prepare_implementation_review,
+    route_by_strategy
 )
 from src.agents.phase6_deployment import (
     pre_deployment_validation,
@@ -140,13 +148,12 @@ def create_migration_workflow() -> StateGraph:
     
     # ========== PHASE 2.5b: LIVELABS REVIEW GATE ==========
     workflow.add_node("livelabs_review_gate", livelabs_review_gate)
+    workflow.add_edge("livelabs_discovery", "livelabs_review_gate")
     workflow.add_edge("livelabs_review_gate", "target_design")
     
     # Continue analysis
     workflow.add_edge("target_design", "resource_sizing")
     workflow.add_edge("resource_sizing", "cost_estimation")
-    workflow.add_edge("cost_estimation", "design_phase_start")
-    
     # ========== PHASE 3: DESIGN ==========
     workflow.add_node("formal_architecture_modeling", formal_architecture_modeling)
     workflow.add_node("component_definition", component_definition)
@@ -154,7 +161,7 @@ def create_migration_workflow() -> StateGraph:
     workflow.add_node("topological_sort_deployment", topological_sort_deployment)
     workflow.add_node("diagram_generation", diagram_generation)
     workflow.add_node("design_phase_complete", design_phase_complete)
-    
+
     workflow.add_edge("cost_estimation", "formal_architecture_modeling")
     workflow.add_edge("formal_architecture_modeling", "component_definition")
     workflow.add_edge("component_definition", "dependency_mapping")
@@ -165,8 +172,6 @@ def create_migration_workflow() -> StateGraph:
     
     # ========== PHASE 3.5: DESIGN REVIEW GATE ==========
     workflow.add_node("design_review_gate", design_review_gate)
-    workflow.add_edge("design_review_gate", "review_phase_start")
-    
     # ========== PHASE 4: REVIEW ==========
     workflow.add_node("final_validation", final_validation)
     workflow.add_node("compliance_check", compliance_check)
@@ -174,7 +179,7 @@ def create_migration_workflow() -> StateGraph:
     workflow.add_node("cost_verification", cost_verification)
     workflow.add_node("feedback_incorporation", feedback_incorporation)
     workflow.add_node("approval_check", approval_check)
-    
+
     workflow.add_edge("design_review_gate", "final_validation")
     workflow.add_edge("final_validation", "compliance_check")
     workflow.add_edge("compliance_check", "risk_assessment")
@@ -194,21 +199,56 @@ def create_migration_workflow() -> StateGraph:
     
     # ========== PHASE 5: IMPLEMENTATION ==========
     workflow.add_node("strategy_selection", strategy_selection)
+
+    # Pathway A: Pre-packaged components
+    workflow.add_node("component_selection", component_selection)
+    workflow.add_node("component_configuration", component_configuration)
+
+    # Pathway B: Dynamic Terraform generation (default)
     workflow.add_node("terraform_module_definition", terraform_module_definition)
     workflow.add_node("terraform_code_generation", terraform_code_generation)
     workflow.add_node("code_validation", code_validation)
     workflow.add_node("project_export", project_export)
-    
-    workflow.add_edge("strategy_selection", "terraform_module_definition")
+    workflow.add_node("project_import", project_import)
+    workflow.add_node("import_validation", import_validation)
+
+    # Pathway C: Third-party frameworks
+    workflow.add_node("framework_selection", framework_selection)
+    workflow.add_node("framework_configuration", framework_configuration)
+
+    # Convergence node
+    workflow.add_node("prepare_implementation_review", prepare_implementation_review)
+
+    # Route by strategy after selection
+    workflow.add_conditional_edges(
+        "strategy_selection",
+        route_by_strategy,
+        {
+            "pre_packaged": "component_selection",
+            "dynamic_terraform": "terraform_module_definition",
+            "third_party": "framework_selection"
+        }
+    )
+
+    # Pathway A edges
+    workflow.add_edge("component_selection", "component_configuration")
+    workflow.add_edge("component_configuration", "prepare_implementation_review")
+
+    # Pathway B edges
     workflow.add_edge("terraform_module_definition", "terraform_code_generation")
     workflow.add_edge("terraform_code_generation", "code_validation")
     workflow.add_edge("code_validation", "project_export")
     workflow.add_edge("project_export", "code_review_gate")
-    
+    workflow.add_edge("project_import", "import_validation")
+    workflow.add_edge("import_validation", "prepare_implementation_review")
+
+    # Pathway C edges
+    workflow.add_edge("framework_selection", "framework_configuration")
+    workflow.add_edge("framework_configuration", "prepare_implementation_review")
+
     # ========== PHASE 5.5: CODE REVIEW GATE ==========
     workflow.add_node("code_review_gate", code_review_gate)
-    workflow.add_edge("code_review_gate", "deployment_phase_start")
-    
+    workflow.add_edge("code_review_gate", "prepare_implementation_review")
     # ========== PHASE 6: DEPLOYMENT ==========
     workflow.add_node("pre_deployment_validation", pre_deployment_validation)
     workflow.add_node("create_rm_stack", create_rm_stack)
