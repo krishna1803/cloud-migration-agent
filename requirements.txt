@@ -42,7 +42,7 @@ pydantic>=2.9.2
 pydantic-settings>=2.5.2
 python-dotenv>=1.0.1
 python-multipart>=0.0.12
-aiofiles>=24.1.0
+aiofiles
 
 # ── Observability ─────────────────────────────────────────────────────────────
 opentelemetry-api>=1.27.0
