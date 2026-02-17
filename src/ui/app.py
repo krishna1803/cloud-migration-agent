@@ -10,8 +10,10 @@ try:
     import gradio as gr
     import requests
     GRADIO_AVAILABLE = True
-except ImportError:
+    _IMPORT_ERROR = None
+except Exception as _e:
     GRADIO_AVAILABLE = False
+    _IMPORT_ERROR = _e
 
 API_BASE = "http://localhost:8000"
 
@@ -35,7 +37,10 @@ def _get(endpoint: str, params: dict = None) -> Tuple[bool, Any]:
 def create_ui():
     """Create and return the Gradio UI application."""
     if not GRADIO_AVAILABLE:
-        raise ImportError("Install with: pip install gradio requests")
+        raise ImportError(
+            f"Failed to import UI dependencies: {_IMPORT_ERROR}. "
+            "Install with: pip install gradio requests"
+        ) from _IMPORT_ERROR
 
     with gr.Blocks(title="Cloud Migration Agent v4.0.0", theme=gr.themes.Soft(primary_hue="orange")) as app:
 
