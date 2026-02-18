@@ -5,6 +5,7 @@ This phase extracts and analyzes source cloud architecture from
 evidence (documents, BoM, user input).
 """
 
+import time
 from typing import Dict, Any, List
 
 from src.models.state_schema import (
@@ -12,11 +13,19 @@ from src.models.state_schema import (
     NetworkArchitecture, ComputeResource, StorageResource, SecurityPosture
 )
 from src.utils.oci_genai import get_llm
-from src.utils.logger import logger
+from src.utils.logger import logger, log_node_entry, log_node_exit, log_llm_call, log_error
 
 
 def intake_plan(state: MigrationState) -> MigrationState:
     """Intake migration request and initialize workflow."""
+    t0 = time.time()
+    log_node_entry(state.migration_id, "discovery", "intake_plan", {
+        "source_provider": state.source_provider,
+        "target_region": getattr(state, "target_region", ""),
+        "user_context_chars": len(state.user_context or ""),
+        "uploaded_documents": len(state.uploaded_documents or []),
+        "bom_file": bool(state.bom_file),
+    })
     try:
         logger.info(f"Starting intake for migration {state.migration_id}")
         state.current_phase = "discovery"
@@ -26,8 +35,13 @@ def intake_plan(state: MigrationState) -> MigrationState:
             "content": f"Migration intake started for {state.source_provider} to OCI"
         })
         logger.info(f"Intake complete for migration {state.migration_id}")
+        log_node_exit(state.migration_id, "discovery", "intake_plan", {
+            "phase": state.current_phase,
+            "status": state.phase_status,
+        }, (time.time() - t0) * 1000)
         return state
     except Exception as e:
+        log_error(state.migration_id, "IntakeError", str(e), "discovery")
         logger.error(f"Intake failed: {str(e)}")
         state.errors.append(f"Intake error: {str(e)}")
         state.phase_status = PhaseStatus.FAILED
@@ -36,6 +50,10 @@ def intake_plan(state: MigrationState) -> MigrationState:
 
 def kb_enrich_discovery(state: MigrationState) -> MigrationState:
     """Enrich discovery with knowledge base intelligence."""
+    t0 = time.time()
+    log_node_entry(state.migration_id, "discovery", "kb_enrich_discovery", {
+        "source_provider": state.source_provider,
+    })
     try:
         logger.info(f"KB enrichment for migration {state.migration_id}")
         state.discovery.kb_intelligence = {
@@ -47,8 +65,12 @@ def kb_enrich_discovery(state: MigrationState) -> MigrationState:
             "role": "system",
             "content": "Knowledge base enrichment completed"
         })
+        log_node_exit(state.migration_id, "discovery", "kb_enrich_discovery", {
+            "kb_keys": list(state.discovery.kb_intelligence.keys()),
+        }, (time.time() - t0) * 1000)
         return state
     except Exception as e:
+        log_error(state.migration_id, "KBEnrichError", str(e), "discovery")
         logger.error(f"KB enrichment failed: {str(e)}")
         state.errors.append(f"KB enrichment error: {str(e)}")
         return state
@@ -56,12 +78,20 @@ def kb_enrich_discovery(state: MigrationState) -> MigrationState:
 
 def document_ingestion(state: MigrationState) -> MigrationState:
     """Process uploaded documents (PDF, DOCX, diagrams)."""
+    t0 = time.time()
+    log_node_entry(state.migration_id, "discovery", "document_ingestion", {
+        "document_count": len(state.uploaded_documents or []),
+        "document_paths": str([d[:80] for d in (state.uploaded_documents or [])]),
+    })
     try:
         logger.info(f"Processing documents for migration {state.migration_id}")
         if not state.uploaded_documents:
             logger.warning("No documents to process")
+            log_node_exit(state.migration_id, "discovery", "document_ingestion",
+                          {"skipped": "no documents"}, (time.time() - t0) * 1000)
             return state
 
+        processed_count = 0
         try:
             from src.utils.document_processor import DocumentProcessor
             processor = DocumentProcessor()
@@ -72,12 +102,17 @@ def document_ingestion(state: MigrationState) -> MigrationState:
                         "role": "system",
                         "content": f"Processed {doc['file_type']}: {doc['file_path']}"
                     })
+                    processed_count += 1
             logger.info(f"Processed {len(processed_docs)} documents")
         except ImportError:
             logger.warning("Document processor not available, skipping")
 
+        log_node_exit(state.migration_id, "discovery", "document_ingestion", {
+            "processed_count": processed_count,
+        }, (time.time() - t0) * 1000)
         return state
     except Exception as e:
+        log_error(state.migration_id, "DocumentIngestionError", str(e), "discovery")
         logger.error(f"Document ingestion failed: {str(e)}")
         state.errors.append(f"Document ingestion error: {str(e)}")
         return state
@@ -85,12 +120,20 @@ def document_ingestion(state: MigrationState) -> MigrationState:
 
 def bom_analysis(state: MigrationState) -> MigrationState:
     """Parse Excel/CSV Bill of Materials for cost data."""
+    t0 = time.time()
+    log_node_entry(state.migration_id, "discovery", "bom_analysis", {
+        "bom_file": state.bom_file or "none",
+    })
     try:
         logger.info(f"Analyzing BOM for migration {state.migration_id}")
         if not state.bom_file:
             logger.warning("No BOM file provided")
+            log_node_exit(state.migration_id, "discovery", "bom_analysis",
+                          {"skipped": "no bom file"}, (time.time() - t0) * 1000)
             return state
 
+        bom_resources = 0
+        bom_cost = 0.0
         try:
             from src.utils.document_processor import DocumentProcessor
             processor = DocumentProcessor()
@@ -100,15 +143,21 @@ def bom_analysis(state: MigrationState) -> MigrationState:
                     "role": "system",
                     "content": f"BOM resource: {resource.get('name', 'Unknown')}"
                 })
+            bom_resources = bom_data.get("num_resources", 0)
+            bom_cost = bom_data.get("total_monthly_cost", 0.0)
             logger.info(
-                f"Analyzed BOM: {bom_data['num_resources']} resources, "
-                f"${bom_data['total_monthly_cost']:.2f}/month"
+                f"Analyzed BOM: {bom_resources} resources, ${bom_cost:.2f}/month"
             )
         except (ImportError, Exception) as e:
             logger.warning(f"BOM processing skipped: {e}")
 
+        log_node_exit(state.migration_id, "discovery", "bom_analysis", {
+            "bom_resources": bom_resources,
+            "bom_monthly_cost_usd": bom_cost,
+        }, (time.time() - t0) * 1000)
         return state
     except Exception as e:
+        log_error(state.migration_id, "BOMAnalysisError", str(e), "discovery")
         logger.error(f"BOM analysis failed: {str(e)}")
         state.errors.append(f"BOM analysis error: {str(e)}")
         return state
@@ -116,6 +165,13 @@ def bom_analysis(state: MigrationState) -> MigrationState:
 
 def extract_evidence(state: MigrationState) -> MigrationState:
     """Consolidate evidence from all sources using LLM."""
+    t0 = time.time()
+    context = "\n".join([msg["content"] for msg in state.messages])
+    log_node_entry(state.migration_id, "discovery", "extract_evidence", {
+        "context_chars": len(context),
+        "user_context_chars": len(state.user_context or ""),
+        "messages_count": len(state.messages),
+    })
     try:
         logger.info(f"Extracting evidence for migration {state.migration_id}")
 
@@ -143,12 +199,32 @@ def extract_evidence(state: MigrationState) -> MigrationState:
                 ("user", "Context: {context}\n\nUser provided: {user_context}")
             ])
 
-            context = "\n".join([msg["content"] for msg in state.messages])
+            # Format prompt for preview logging
+            prompt_text = (
+                f"[SYSTEM] Extract services/network/compute/storage/security. "
+                f"Context ({len(context)} chars): {context[:400]}... "
+                f"User context: {state.user_context}"
+            )
+
+            llm_t0 = time.time()
             chain = prompt | llm | JsonOutputParser()
             evidence = chain.invoke({
                 "context": context,
                 "user_context": state.user_context
             })
+            llm_duration = (time.time() - llm_t0) * 1000
+
+            response_preview = (
+                f"services={len(evidence.get('services', []))}, "
+                f"compute={len(evidence.get('compute', []))}, "
+                f"storage={len(evidence.get('storage', []))}"
+            )
+            log_llm_call(
+                state.migration_id, "extract_evidence",
+                prompt_preview=prompt_text,
+                response_preview=response_preview,
+                duration_ms=llm_duration,
+            )
 
             # Parse services
             for svc in evidence.get("services", []):
@@ -162,8 +238,13 @@ def extract_evidence(state: MigrationState) -> MigrationState:
             logger.warning(f"LLM evidence extraction failed, using fallback: {e}")
             _extract_evidence_fallback(state)
 
+        log_node_exit(state.migration_id, "discovery", "extract_evidence", {
+            "discovered_services": len(state.discovery.discovered_services),
+            "service_names": str([s.service_name for s in state.discovery.discovered_services[:10]]),
+        }, (time.time() - t0) * 1000)
         return state
     except Exception as e:
+        log_error(state.migration_id, "ExtractEvidenceError", str(e), "discovery")
         logger.error(f"Evidence extraction failed: {str(e)}")
         state.errors.append(f"Evidence extraction error: {str(e)}")
         _extract_evidence_fallback(state)
@@ -215,6 +296,12 @@ def _extract_evidence_fallback(state: MigrationState):
 
 def gap_detection(state: MigrationState) -> MigrationState:
     """Identify gaps and calculate confidence score."""
+    t0 = time.time()
+    log_node_entry(state.migration_id, "discovery", "gap_detection", {
+        "discovered_services": len(state.discovery.discovered_services),
+        "service_names": str([s.service_name for s in state.discovery.discovered_services[:10]]),
+        "user_context": state.user_context[:200] if state.user_context else "",
+    })
     try:
         logger.info(f"Detecting gaps for migration {state.migration_id}")
 
@@ -231,11 +318,32 @@ def gap_detection(state: MigrationState) -> MigrationState:
                 """),
                 ("user", "Discovered services: {services}\nUser context: {user_context}")
             ])
+
+            services_payload = str([s.model_dump() for s in state.discovery.discovered_services])
+            prompt_preview = (
+                f"[SYSTEM] Identify gaps + confidence. "
+                f"Services: {services_payload[:400]} "
+                f"User context: {state.user_context[:200]}"
+            )
+
+            llm_t0 = time.time()
             chain = prompt | llm | JsonOutputParser()
             result = chain.invoke({
-                "services": str([s.model_dump() for s in state.discovery.discovered_services]),
+                "services": services_payload,
                 "user_context": state.user_context
             })
+            llm_duration = (time.time() - llm_t0) * 1000
+
+            log_llm_call(
+                state.migration_id, "gap_detection",
+                prompt_preview=prompt_preview,
+                response_preview=(
+                    f"gaps={len(result.get('gaps', []))}, "
+                    f"confidence={result.get('confidence', 0):.2f}, "
+                    f"rationale={str(result.get('rationale', ''))[:200]}"
+                ),
+                duration_ms=llm_duration,
+            )
 
             for gap_data in result.get("gaps", []):
                 state.discovery.gaps_identified.append(Gap(**gap_data))
@@ -249,8 +357,14 @@ def gap_detection(state: MigrationState) -> MigrationState:
             f"Gap detection complete: {len(state.discovery.gaps_identified)} gaps, "
             f"confidence: {state.discovery.discovery_confidence:.2%}"
         )
+        log_node_exit(state.migration_id, "discovery", "gap_detection", {
+            "gaps_count": len(state.discovery.gaps_identified),
+            "confidence": round(state.discovery.discovery_confidence, 3),
+            "gap_severities": str([g.severity for g in state.discovery.gaps_identified]),
+        }, (time.time() - t0) * 1000)
         return state
     except Exception as e:
+        log_error(state.migration_id, "GapDetectionError", str(e), "discovery")
         logger.error(f"Gap detection failed: {str(e)}")
         state.errors.append(f"Gap detection error: {str(e)}")
         state.discovery.discovery_confidence = 0.3
@@ -303,6 +417,11 @@ def _gap_detection_fallback(state: MigrationState):
 
 def clarifications_needed(state: MigrationState) -> MigrationState:
     """Request clarifications if confidence is below threshold."""
+    t0 = time.time()
+    log_node_entry(state.migration_id, "discovery", "clarifications_needed", {
+        "gaps_count": len(state.discovery.gaps_identified),
+        "confidence": round(state.discovery.discovery_confidence, 3),
+    })
     try:
         logger.info(f"Requesting clarifications for migration {state.migration_id}")
         clarification_questions = []
@@ -312,8 +431,13 @@ def clarifications_needed(state: MigrationState) -> MigrationState:
         state.discovery.clarifications_requested = clarification_questions
         state.phase_status = PhaseStatus.WAITING_REVIEW
         logger.info(f"Requested {len(clarification_questions)} clarifications")
+        log_node_exit(state.migration_id, "discovery", "clarifications_needed", {
+            "clarifications_count": len(clarification_questions),
+            "questions": str(clarification_questions[:3]),
+        }, (time.time() - t0) * 1000)
         return state
     except Exception as e:
+        log_error(state.migration_id, "ClarificationError", str(e), "discovery")
         logger.error(f"Clarification request failed: {str(e)}")
         state.errors.append(f"Clarification error: {str(e)}")
         return state
@@ -323,6 +447,19 @@ def should_request_clarifications(state: MigrationState) -> str:
     """Determine if clarifications are needed based on confidence."""
     from src.utils.config import config
     threshold = config.app.discovery_confidence_threshold
-    if state.discovery.discovery_confidence < threshold:
-        return "clarify"
-    return "continue"
+    decision = "clarify" if state.discovery.discovery_confidence < threshold else "continue"
+    logger.info(
+        f"[discovery:should_request_clarifications] "
+        f"confidence={state.discovery.discovery_confidence:.2%} "
+        f"threshold={threshold:.2%} → {decision}",
+        extra={
+            "event_type": "routing_decision",
+            "migration_id": state.migration_id,
+            "phase": "discovery",
+            "node": "should_request_clarifications",
+            "confidence": round(state.discovery.discovery_confidence, 3),
+            "threshold": threshold,
+            "decision": decision,
+        },
+    )
+    return decision

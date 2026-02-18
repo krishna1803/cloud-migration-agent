@@ -67,7 +67,7 @@ def run_ui(host: str = "0.0.0.0", port: int = 7860):
         from src.ui.app import create_ui
         ui = create_ui()
         logger.info(f"Starting Gradio UI on {host}:{port}")
-        ui.launch(server_name=host, server_port=port, share=False, theme=gr.themes.Soft(primary_hue="orange"))
+        ui.launch(server_name=host, server_port=port, share=False)
     except ImportError as e:
         logger.error(f"Could not start UI: {e}")
         print(f"Error: {e}")

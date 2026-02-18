@@ -4,6 +4,7 @@ OCI Generative AI Service integration for LangChain.
 Provides LLM and embedding models using OCI GenAI.
 """
 
+import time
 import oci
 from typing import Any, List, Optional, Dict
 from langchain_core.language_models.llms import LLM
@@ -13,6 +14,8 @@ from pydantic import Field
 
 from src.utils.config import config
 from src.utils.logger import logger
+
+_MAX_PREVIEW = 800   # characters to log for prompt / response previews
 
 
 class OCIGenAI(LLM):
@@ -78,26 +81,42 @@ class OCIGenAI(LLM):
     ) -> str:
         """
         Call OCI GenAI model.
-        
+
         Args:
             prompt: The prompt to send to the model
             stop: Stop sequences
             run_manager: Callback manager
             **kwargs: Additional arguments
-            
+
         Returns:
             Model response text
         """
+        t0 = time.time()
+        max_tok = kwargs.get("max_tokens", self.max_tokens)
+        temp = kwargs.get("temperature", self.temperature)
+
+        logger.info(
+            "[LLM] OCI GenAI request",
+            extra={
+                "event_type": "llm_request",
+                "model_id": self.model_id,
+                "max_tokens": max_tok,
+                "temperature": temp,
+                "prompt_chars": len(prompt),
+                "prompt_preview": prompt[:_MAX_PREVIEW],
+            },
+        )
+
         try:
             # Prepare request
             chat_request = oci.generative_ai_inference.models.CohereChatRequest()
             chat_request.message = prompt
-            chat_request.max_tokens = kwargs.get('max_tokens', self.max_tokens)
-            chat_request.temperature = kwargs.get('temperature', self.temperature)
-            
+            chat_request.max_tokens = max_tok
+            chat_request.temperature = temp
+
             if stop:
                 chat_request.stop_sequences = stop
-            
+
             # Create chat details
             chat_detail = oci.generative_ai_inference.models.ChatDetails()
             chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(
@@ -105,17 +124,38 @@ class OCIGenAI(LLM):
             )
             chat_detail.compartment_id = self.compartment_id
             chat_detail.chat_request = chat_request
-            
+
             # Make request
             chat_response = self._client.chat(chat_detail)
-            
+
             # Extract response text
             response_text = chat_response.data.chat_response.text
-            
+
+            duration_ms = (time.time() - t0) * 1000
+            logger.info(
+                f"[LLM] OCI GenAI response [{duration_ms:.0f}ms]",
+                extra={
+                    "event_type": "llm_response",
+                    "model_id": self.model_id,
+                    "duration_ms": round(duration_ms, 1),
+                    "response_chars": len(response_text),
+                    "response_preview": response_text[:_MAX_PREVIEW],
+                },
+            )
+
             return response_text
-            
+
         except Exception as e:
-            logger.error(f"OCI GenAI call failed: {str(e)}")
+            duration_ms = (time.time() - t0) * 1000
+            logger.error(
+                f"[LLM] OCI GenAI call failed [{duration_ms:.0f}ms]: {e}",
+                extra={
+                    "event_type": "llm_error",
+                    "model_id": self.model_id,
+                    "duration_ms": round(duration_ms, 1),
+                    "error": str(e),
+                },
+            )
             raise
     
     async def _acall(

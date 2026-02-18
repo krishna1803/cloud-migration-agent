@@ -20,7 +20,10 @@ from src.models.state_schema import (
 )
 from src.utils.oci_genai import get_llm
 from src.utils.config import config
-from src.utils.logger import logger
+from src.utils.logger import logger, log_node_entry, log_node_exit, log_mcp_call, log_error
+
+# MCP server — OCI Resource Manager
+from src.mcp_servers.oci_rm_server import oci_rm_server
 
 
 # Phase 6 Node 1: Pre-Deployment Validation
@@ -42,11 +45,16 @@ def pre_deployment_validation(state: MigrationState) -> MigrationState:
         Updated state with pre-deployment validation results
     """
     try:
-        logger.info(f"Pre-deployment validation for migration {state.migration_id}")
-        
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "pre_deployment_validation", {
+            "target_region": state.target_region,
+            "components": len(state.design.architecture_components),
+            "tf_files": len(state.implementation.generated_code),
+        })
+
         state.current_phase = "deployment"
         state.phase_status = PhaseStatus.IN_PROGRESS
-        
+
         validations = []
         
         # Validation 1: OCI Credentials
@@ -112,17 +120,24 @@ def pre_deployment_validation(state: MigrationState) -> MigrationState:
         
         # Check if all critical validations passed
         critical_failures = [v for v in validations if not v.passed and v.severity == "error"]
-        
+
         if critical_failures:
-            logger.error(f"{len(critical_failures)} critical validation failures")
             state.errors.append(f"Pre-deployment validation failed: {len(critical_failures)} critical issues")
-        else:
-            logger.info("Pre-deployment validation passed")
-        
+
+        passed_checks = [v.check_name for v in validations if v.passed]
+        failed_checks = [v.check_name for v in validations if not v.passed]
+        log_node_exit(state.migration_id, "deployment", "pre_deployment_validation", {
+            "total_checks": len(validations),
+            "passed": len(passed_checks),
+            "failed": len(failed_checks),
+            "failed_checks": str(failed_checks),
+            "critical_failures": len(critical_failures),
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Pre-deployment validation failed: {str(e)}")
+        log_error(state.migration_id, "pre_validation_error", str(e), phase="deployment")
         state.errors.append(f"Pre-deployment validation error: {str(e)}")
         return state
 
@@ -130,39 +145,74 @@ def pre_deployment_validation(state: MigrationState) -> MigrationState:
 # Phase 6 Node 2: Create OCI Resource Manager Stack
 def create_rm_stack(state: MigrationState) -> MigrationState:
     """
-    Create OCI Resource Manager stack from Terraform code.
-    
-    Args:
-        state: Current migration state
-        
-    Returns:
-        Updated state with stack ID
+    Create OCI Resource Manager stack from Terraform code via oci_rm_server.
+
+    The MCP server handles real OCI SDK calls when credentials are present,
+    and falls back to a realistic mock when running without OCI config.
     """
     try:
-        logger.info(f"Creating OCI RM stack for migration {state.migration_id}")
-        
-        # Create zip file with Terraform code
-        zip_path = create_terraform_zip(state)
-        
-        # TODO: Replace with actual OCI SDK call
-        # For now, simulate stack creation
-        stack_id = f"ocid1.ormstack.oc1..{state.migration_id}"
-        stack_name = f"migration-{state.migration_id}"
-        
-        state.deployment.stack_id = stack_id
+        t0 = time.time()
+        stack_name = f"migration-{state.migration_id[:8]}"
+        log_node_entry(state.migration_id, "deployment", "create_rm_stack", {
+            "stack_name": stack_name,
+            "tf_files": len(state.implementation.generated_code),
+        })
+
+        # Combine all generated Terraform files into one string for the MCP server
+        combined_tf = "\n\n".join(
+            f"# --- {code.file_path} ---\n{code.content}"
+            for code in state.implementation.generated_code
+        ) if state.implementation.generated_code else (
+            'resource "oci_core_vcn" "main" { compartment_id = var.compartment_ocid }'
+        )
+
+        compartment_id = getattr(config.oci, "compartment_id", "") or "ocid1.compartment.oc1..unknown"
+
+        t_mcp = time.time()
+        result = oci_rm_server.create_stack(
+            name=stack_name,
+            terraform_code=combined_tf,
+            compartment_id=compartment_id,
+        )
+        mcp_ms = (time.time() - t_mcp) * 1000
+
+        log_mcp_call(
+            state.migration_id,
+            "oci_rm_server",
+            "create_stack",
+            inputs={
+                "name": stack_name,
+                "compartment_id": compartment_id,
+                "tf_chars": len(combined_tf),
+            },
+            result={
+                "stack_id": result.get("stack_id", ""),
+                "mode": result.get("mode", "unknown"),
+            },
+            duration_ms=mcp_ms,
+        )
+
+        state.deployment.stack_id = result["stack_id"]
         state.deployment.stack_name = stack_name
-        
-        logger.info(f"Created OCI RM stack: {stack_id}")
-        
+
         state.messages.append({
             "role": "system",
-            "content": f"OCI Resource Manager stack created: {stack_name}"
+            "content": (
+                f"OCI Resource Manager stack created: {stack_name} "
+                f"(id: {result['stack_id']}, mode: {result.get('mode', 'unknown')})"
+            ),
         })
-        
+
+        log_node_exit(state.migration_id, "deployment", "create_rm_stack", {
+            "stack_id": result.get("stack_id", ""),
+            "stack_name": stack_name,
+            "mode": result.get("mode", "unknown"),
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"OCI RM stack creation failed: {str(e)}")
+        log_error(state.migration_id, "create_rm_stack_error", str(e), phase="deployment")
         state.errors.append(f"Stack creation error: {str(e)}")
         return state
 
@@ -184,57 +234,67 @@ def create_terraform_zip(state: MigrationState) -> str:
 # Phase 6 Node 3: Generate Terraform Plan
 def generate_terraform_plan(state: MigrationState) -> MigrationState:
     """
-    Generate Terraform plan using OCI Resource Manager.
-    
-    Args:
-        state: Current migration state
-        
-    Returns:
-        Updated state with Terraform plan
+    Generate Terraform plan using OCI Resource Manager via oci_rm_server.
+
+    Calls plan_stack() on the stack created in the previous node and stores
+    the job ID plus the plan output text in state.
     """
     try:
-        logger.info(f"Generating Terraform plan for migration {state.migration_id}")
-        
-        # TODO: Replace with actual OCI RM plan job
-        # For now, simulate plan generation
-        
-        plan_output = f"""
-Terraform Plan Summary for {state.migration_id}
-============================================
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "generate_terraform_plan", {
+            "stack_id": state.deployment.stack_id,
+            "estimated_monthly_cost_usd": state.analysis.total_monthly_cost_usd,
+        })
 
-Resources to be created: {len(state.design.architecture_components)}
+        if not state.deployment.stack_id:
+            raise ValueError("No stack_id available — create_rm_stack must run first")
 
-Network Resources:
-- 1 VCN (10.0.0.0/16)
-- 3 Subnets (public, private, database)
-- 1 Internet Gateway
-- 1 NAT Gateway
-- 2 Route Tables
-- 3 Security Lists
+        t_mcp = time.time()
+        result = oci_rm_server.plan_stack(state.deployment.stack_id)
+        mcp_ms = (time.time() - t_mcp) * 1000
 
-Compute Resources:
-- 3 VM Instances (VM.Standard.E4.Flex)
-- 1 Load Balancer (Flexible shape)
+        plan_job_id = result.get("job_id", "")
+        plan_output = result.get("plan_output", "")
+        plan_status = result.get("job", {}).get("lifecycle_state", "SUCCEEDED")
 
-Database Resources:
-- 1 Autonomous Database (2 OCPU)
+        log_mcp_call(
+            state.migration_id,
+            "oci_rm_server",
+            "plan_stack",
+            inputs={"stack_id": state.deployment.stack_id},
+            result={
+                "job_id": plan_job_id,
+                "lifecycle_state": plan_status,
+                "plan_output_chars": len(plan_output),
+            },
+            duration_ms=mcp_ms,
+        )
 
-Storage Resources:
-- 1 Object Storage Bucket
+        # Annotate plan output with cost estimate from Phase 2
+        cost_note = (
+            f"\nEstimated Monthly Cost (Phase 2 Analysis): "
+            f"${state.analysis.total_monthly_cost_usd:.2f}\n"
+        )
+        state.deployment.terraform_plan = plan_output + cost_note
 
-Estimated Monthly Cost: ${state.analysis.total_monthly_cost_usd:.2f}
+        # Track the plan job
+        if plan_job_id:
+            state.deployment.deployment_jobs.append(DeploymentJob(
+                job_id=plan_job_id,
+                status=plan_status,
+                created_at=datetime.utcnow(),
+                logs=[f"Plan job submitted: {plan_job_id}"],
+            ))
 
-Plan Status: Ready for apply
-"""
-        
-        state.deployment.terraform_plan = plan_output
-        
-        logger.info("Terraform plan generated successfully")
-        
+        log_node_exit(state.migration_id, "deployment", "generate_terraform_plan", {
+            "plan_job_id": plan_job_id,
+            "plan_status": plan_status,
+            "plan_chars": len(state.deployment.terraform_plan),
+        }, duration_ms=(time.time() - t0) * 1000)
         return state
-        
+
     except Exception as e:
-        logger.error(f"Terraform plan generation failed: {str(e)}")
+        log_error(state.migration_id, "terraform_plan_error", str(e), phase="deployment")
         state.errors.append(f"Plan generation error: {str(e)}")
         return state
 
@@ -242,54 +302,70 @@ Plan Status: Ready for apply
 # Phase 6 Node 4: Execute Deployment
 def execute_deployment(state: MigrationState) -> MigrationState:
     """
-    Execute Terraform apply through OCI Resource Manager.
-    
-    Args:
-        state: Current migration state
-        
-    Returns:
-        Updated state with deployment job
+    Execute Terraform apply through OCI Resource Manager via oci_rm_server.
+
+    Requires plan_approved = True (set by the plan_review_gate).
+    Calls apply_stack() and records the apply job in deployment_jobs.
     """
     try:
-        logger.info(f"Executing deployment for migration {state.migration_id}")
-        
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "execute_deployment", {
+            "stack_id": state.deployment.stack_id,
+            "plan_approved": state.deployment.plan_approved,
+            "existing_jobs": len(state.deployment.deployment_jobs),
+        })
+
         if not state.deployment.plan_approved:
-            logger.error("Terraform plan not approved")
+            logger.error(
+                f"[DEPLOYMENT:execute_deployment] Plan not approved for migration {state.migration_id}"
+            )
             state.errors.append("Cannot deploy: plan not approved")
             return state
-        
-        # TODO: Replace with actual OCI RM apply job
-        # For now, simulate deployment
-        
-        job_id = f"ocid1.ormjob.oc1..{state.migration_id}-apply"
-        
+
+        if not state.deployment.stack_id:
+            raise ValueError("No stack_id available — create_rm_stack must run first")
+
+        t_mcp = time.time()
+        result = oci_rm_server.apply_stack(state.deployment.stack_id)
+        mcp_ms = (time.time() - t_mcp) * 1000
+
+        job_id = result.get("job_id", "")
+        apply_status = result.get("status", "IN_PROGRESS")
+
+        log_mcp_call(
+            state.migration_id,
+            "oci_rm_server",
+            "apply_stack",
+            inputs={"stack_id": state.deployment.stack_id},
+            result={
+                "job_id": job_id,
+                "status": apply_status,
+            },
+            duration_ms=mcp_ms,
+        )
+
         deployment_job = DeploymentJob(
             job_id=job_id,
-            status="IN_PROGRESS",
+            status=apply_status,
             created_at=datetime.utcnow(),
-            logs=[
-                "Starting Terraform apply...",
-                "Creating VCN...",
-                "Creating subnets...",
-                "Creating Internet Gateway...",
-                "Creating compute instances...",
-                "Deployment in progress..."
-            ]
+            logs=[f"Apply job submitted: {job_id}", "Terraform apply in progress..."],
         )
-        
         state.deployment.deployment_jobs.append(deployment_job)
-        
-        logger.info(f"Deployment job started: {job_id}")
-        
+
         state.messages.append({
             "role": "system",
-            "content": f"Deployment started: {job_id}"
+            "content": f"OCI Resource Manager apply job started: {job_id}",
         })
-        
+
+        log_node_exit(state.migration_id, "deployment", "execute_deployment", {
+            "apply_job_id": job_id,
+            "initial_status": apply_status,
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Deployment execution failed: {str(e)}")
+        log_error(state.migration_id, "execute_deployment_error", str(e), phase="deployment")
         state.errors.append(f"Deployment execution error: {str(e)}")
         return state
 
@@ -297,47 +373,91 @@ def execute_deployment(state: MigrationState) -> MigrationState:
 # Phase 6 Node 5: Monitor Deployment Progress
 def monitor_deployment(state: MigrationState) -> MigrationState:
     """
-    Monitor OCI Resource Manager deployment progress.
-    
-    This would use SSE (Server-Sent Events) in the real implementation
-    to stream progress to the UI.
-    
-    Args:
-        state: Current migration state
-        
-    Returns:
-        Updated state with deployment progress
+    Monitor OCI Resource Manager deployment progress via oci_rm_server.
+
+    Polls get_job() and get_job_logs() for the most recent apply job and
+    updates the DeploymentJob status and log list in state.
+    Terminal states: SUCCEEDED, FAILED, CANCELED.
     """
     try:
-        logger.info(f"Monitoring deployment for migration {state.migration_id}")
-        
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "monitor_deployment", {
+            "total_jobs": len(state.deployment.deployment_jobs),
+            "job_ids": str([j.job_id for j in state.deployment.deployment_jobs]),
+        })
+
         if not state.deployment.deployment_jobs:
-            logger.warning("No deployment jobs to monitor")
+            logger.warning(
+                f"[DEPLOYMENT:monitor_deployment] No jobs to monitor for migration {state.migration_id}"
+            )
             return state
-        
-        # Get latest job
-        latest_job = state.deployment.deployment_jobs[-1]
-        
-        # TODO: Replace with actual OCI RM job status polling
-        # For now, simulate progress
-        
-        # Update job status and logs
-        latest_job.status = "SUCCEEDED"
-        latest_job.completed_at = datetime.utcnow()
-        latest_job.logs.extend([
-            "Compute instances created",
-            "Load balancer configured",
-            "Database provisioned",
-            "Network security configured",
-            "Deployment completed successfully"
-        ])
-        
-        logger.info(f"Deployment monitoring complete: {latest_job.status}")
-        
+
+        # Poll the most recent apply job (skip plan jobs)
+        apply_jobs = [
+            j for j in state.deployment.deployment_jobs
+            if "apply" in j.job_id.lower() or j.status == "IN_PROGRESS"
+        ]
+        latest_job = (apply_jobs or state.deployment.deployment_jobs)[-1]
+
+        # Fetch current job status
+        t_mcp = time.time()
+        status_result = oci_rm_server.get_job(latest_job.job_id)
+        log_mcp_call(
+            state.migration_id,
+            "oci_rm_server",
+            "get_job",
+            inputs={"job_id": latest_job.job_id},
+            result={
+                "lifecycle_state": status_result.get("job", {}).get("lifecycle_state", "unknown"),
+            },
+            duration_ms=(time.time() - t_mcp) * 1000,
+        )
+
+        job_info = status_result.get("job", {})
+        prev_status = latest_job.status
+        latest_job.status = job_info.get("lifecycle_state", latest_job.status)
+
+        # Fetch job logs
+        t_logs = time.time()
+        logs_result = oci_rm_server.get_job_logs(latest_job.job_id)
+        log_mcp_call(
+            state.migration_id,
+            "oci_rm_server",
+            "get_job_logs",
+            inputs={"job_id": latest_job.job_id},
+            result={
+                "log_count": logs_result.get("log_count", 0),
+                "sample_messages": str([e["message"] for e in logs_result.get("logs", [])[:3]]),
+            },
+            duration_ms=(time.time() - t_logs) * 1000,
+        )
+
+        new_logs = [entry["message"] for entry in logs_result.get("logs", [])]
+        # Append only new messages (avoid duplicates)
+        existing = set(latest_job.logs)
+        new_count = 0
+        for m in new_logs:
+            if m not in existing:
+                latest_job.logs.append(m)
+                new_count += 1
+
+        # Mark completion time for terminal states
+        terminal_states = {"SUCCEEDED", "FAILED", "CANCELED"}
+        if latest_job.status in terminal_states and not latest_job.completed_at:
+            latest_job.completed_at = datetime.utcnow()
+
+        log_node_exit(state.migration_id, "deployment", "monitor_deployment", {
+            "job_id": latest_job.job_id,
+            "prev_status": prev_status,
+            "current_status": latest_job.status,
+            "new_log_entries": new_count,
+            "total_log_entries": len(latest_job.logs),
+            "terminal": latest_job.status in terminal_states,
+        }, duration_ms=(time.time() - t0) * 1000)
         return state
-        
+
     except Exception as e:
-        logger.error(f"Deployment monitoring failed: {str(e)}")
+        log_error(state.migration_id, "monitor_deployment_error", str(e), phase="deployment")
         state.errors.append(f"Deployment monitoring error: {str(e)}")
         return state
 
@@ -361,8 +481,12 @@ def post_deployment_validation(state: MigrationState) -> MigrationState:
         Updated state with post-deployment validation results
     """
     try:
-        logger.info(f"Post-deployment validation for migration {state.migration_id}")
-        
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "post_deployment_validation", {
+            "components": len(state.design.architecture_components),
+            "deployment_jobs": len(state.deployment.deployment_jobs),
+        })
+
         validations = []
         
         # Validation 1: Resources Created
@@ -425,17 +549,22 @@ def post_deployment_validation(state: MigrationState) -> MigrationState:
         
         # Check overall validation status
         all_passed = all(v.passed for v in validations)
-        
+
         if all_passed:
             state.deployment.deployment_successful = True
-            logger.info("Post-deployment validation passed")
-        else:
-            logger.warning("Some post-deployment validations failed")
-        
+
+        failed = [v.check_name for v in validations if not v.passed]
+        log_node_exit(state.migration_id, "deployment", "post_deployment_validation", {
+            "checks_run": len(validations),
+            "all_passed": all_passed,
+            "deployment_successful": state.deployment.deployment_successful,
+            "failed_checks": str(failed),
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Post-deployment validation failed: {str(e)}")
+        log_error(state.migration_id, "post_validation_error", str(e), phase="deployment")
         state.errors.append(f"Post-deployment validation error: {str(e)}")
         return state
 
@@ -452,26 +581,34 @@ def generate_deployment_report(state: MigrationState) -> MigrationState:
         Updated state with report path
     """
     try:
-        logger.info(f"Generating deployment report for migration {state.migration_id}")
-        
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "generate_deployment_report", {
+            "deployment_successful": state.deployment.deployment_successful,
+            "stack_id": state.deployment.stack_id,
+            "jobs": len(state.deployment.deployment_jobs),
+        })
+
         # Generate report content
         report = generate_report_content(state)
-        
+
         # Save report
         report_dir = Path(config.app.export_dir) / state.migration_id
         report_dir.mkdir(parents=True, exist_ok=True)
-        
+
         report_path = report_dir / "deployment_report.md"
         report_path.write_text(report)
-        
+
         state.deployment.deployment_report_path = str(report_path)
-        
-        logger.info(f"Deployment report generated: {report_path}")
-        
+
+        log_node_exit(state.migration_id, "deployment", "generate_deployment_report", {
+            "report_path": str(report_path),
+            "report_chars": len(report),
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Report generation failed: {str(e)}")
+        log_error(state.migration_id, "report_generation_error", str(e), phase="deployment")
         state.errors.append(f"Report generation error: {str(e)}")
         return state
 
@@ -688,18 +825,33 @@ def deployment_complete(state: MigrationState) -> MigrationState:
         Updated state with migration complete
     """
     try:
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "deployment_complete", {
+            "deployment_successful": state.deployment.deployment_successful,
+            "stack_id": state.deployment.stack_id,
+            "report_path": state.deployment.deployment_report_path,
+        })
+
         state.phase_status = PhaseStatus.COMPLETED
-        
-        logger.info(f"🎉 Migration {state.migration_id} completed successfully!")
-        
+
         state.messages.append({
             "role": "system",
-            "content": "🎉 Migration completed successfully! All resources deployed and validated."
+            "content": "Migration completed successfully! All resources deployed and validated."
         })
-        
+
+        log_node_exit(state.migration_id, "deployment", "deployment_complete", {
+            "phase_status": "COMPLETED",
+            "migration_id": state.migration_id,
+            "total_components": len(state.design.architecture_components),
+            "total_jobs": len(state.deployment.deployment_jobs),
+            "report_path": state.deployment.deployment_report_path,
+        }, duration_ms=(time.time() - t0) * 1000)
+
+        logger.info(f"[DEPLOYMENT:deployment_complete] Migration {state.migration_id} DONE")
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Deployment completion failed: {str(e)}")
+        log_error(state.migration_id, "deployment_complete_error", str(e), phase="deployment")
         state.errors.append(f"Deployment completion error: {str(e)}")
         return state

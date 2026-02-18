@@ -46,7 +46,7 @@ def create_ui():
             "Install with: pip install gradio requests"
         ) from _IMPORT_ERROR
 
-    with gr.Blocks(title="Cloud Migration Agent v4.0.0") as app:
+    with gr.Blocks(title="Cloud Migration Agent v4.0.0", theme=gr.themes.Soft(primary_hue="orange")) as app:
 
         gr.HTML("""<div style="background:linear-gradient(135deg,#C74634,#F80000);color:white;padding:20px;border-radius:8px;margin-bottom:20px;">
             <h1>Cloud Migration Agent Platform v4.0.0</h1>
@@ -267,4 +267,4 @@ def create_ui():
 
 if __name__ == "__main__":
     ui = create_ui()
-    ui.launch(server_name="0.0.0.0", server_port=7860, theme=gr.themes.Soft(primary_hue="orange"))
+    ui.launch(server_name="0.0.0.0", server_port=7860)

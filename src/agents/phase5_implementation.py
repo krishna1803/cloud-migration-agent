@@ -6,10 +6,14 @@ This phase generates Terraform code, validates it, and prepares for deployment.
 
 import os
 import json
+import time
 from typing import Dict, Any, List
 from pathlib import Path
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+
+# MCP server — Terraform code generation
+from src.mcp_servers.terraform_gen_server import terraform_gen_server
 
 from src.models.state_schema import (
     MigrationState,
@@ -20,7 +24,7 @@ from src.models.state_schema import (
 )
 from src.utils.oci_genai import get_llm
 from src.utils.config import config
-from src.utils.logger import logger
+from src.utils.logger import logger, log_node_entry, log_node_exit, log_mcp_call, log_llm_call, log_error
 
 
 # Phase 5 Node 1: Strategy Selection
@@ -40,40 +44,47 @@ def strategy_selection(state: MigrationState) -> MigrationState:
         Updated state with selected strategy
     """
     try:
-        logger.info(f"Selecting implementation strategy for migration {state.migration_id}")
-        
-        state.current_phase = "implementation"
-        state.phase_status = PhaseStatus.IN_PROGRESS
-        
-        # Analyze complexity
+        t0 = time.time()
         num_components = len(state.design.architecture_components)
         has_custom_config = any(
-            len(c.configuration) > 5 
+            len(c.configuration) > 5
             for c in state.design.architecture_components
         )
-        
+        log_node_entry(state.migration_id, "implementation", "strategy_selection", {
+            "component_count": num_components,
+            "has_custom_config": has_custom_config,
+        })
+
+        state.current_phase = "implementation"
+        state.phase_status = PhaseStatus.IN_PROGRESS
+
         # Strategy selection logic
         if num_components <= 5 and not has_custom_config:
             strategy = ImplementationStrategy.PRE_PACKAGED
-            logger.info("Selected PRE_PACKAGED strategy (simple architecture)")
+            reason = "simple architecture (≤5 components, no custom config)"
         elif num_components > 20 or has_custom_config:
             strategy = ImplementationStrategy.DYNAMIC_TERRAFORM
-            logger.info("Selected DYNAMIC_TERRAFORM strategy (complex architecture)")
+            reason = "complex architecture (>20 components or custom config)"
         else:
             strategy = ImplementationStrategy.DYNAMIC_TERRAFORM
-            logger.info("Selected DYNAMIC_TERRAFORM strategy (default)")
-        
+            reason = "default"
+
         state.implementation.strategy = strategy
-        
         state.messages.append({
             "role": "system",
             "content": f"Implementation strategy: {strategy.value}"
         })
-        
+
+        log_node_exit(state.migration_id, "implementation", "strategy_selection", {
+            "strategy": strategy.value,
+            "reason": reason,
+            "component_count": num_components,
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Strategy selection failed: {str(e)}")
+        log_error(state.migration_id, "strategy_selection_error", str(e), phase="implementation")
         state.errors.append(f"Strategy selection error: {str(e)}")
         return state
 
@@ -90,8 +101,11 @@ def terraform_module_definition(state: MigrationState) -> MigrationState:
         Updated state with Terraform modules
     """
     try:
-        logger.info(f"Defining Terraform modules for migration {state.migration_id}")
-        
+        t0 = time.time()
+        log_node_entry(state.migration_id, "implementation", "terraform_module_definition", {
+            "strategy": state.implementation.strategy.value if state.implementation.strategy else "unknown",
+        })
+
         # Define standard modules
         modules = [
             TerraformModule(
@@ -150,13 +164,17 @@ def terraform_module_definition(state: MigrationState) -> MigrationState:
         ]
         
         state.implementation.terraform_modules = modules
-        
-        logger.info(f"Defined {len(modules)} Terraform modules")
-        
+
+        module_names = [m.module_name for m in modules]
+        log_node_exit(state.migration_id, "implementation", "terraform_module_definition", {
+            "modules_defined": len(modules),
+            "module_names": str(module_names),
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Terraform module definition failed: {str(e)}")
+        log_error(state.migration_id, "terraform_module_def_error", str(e), phase="implementation")
         state.errors.append(f"Module definition error: {str(e)}")
         return state
 
@@ -164,80 +182,151 @@ def terraform_module_definition(state: MigrationState) -> MigrationState:
 # Phase 5 Node 3: Terraform Code Generation
 def terraform_code_generation(state: MigrationState) -> MigrationState:
     """
-    Generate Terraform code for each component.
-    
-    Args:
-        state: Current migration state
-        
-    Returns:
-        Updated state with generated Terraform code
+    Generate Terraform code using terraform_gen_server MCP tool.
+
+    Strategy:
+      1. Call terraform_gen_server.generate_three_tier_project() to get a
+         complete, validated set of .tf files (provider, variables, network,
+         security, compute, database, load_balancer, outputs).
+      2. Append terraform.tfvars with migration-specific values.
+      3. Use LLM only for components that have a unique OCI service not covered
+         by the standard three-tier template (e.g. OKE, Functions, Streaming).
     """
     try:
-        logger.info(f"Generating Terraform code for migration {state.migration_id}")
-        
-        llm = get_llm()
-        
-        # Generate main.tf
-        main_tf = generate_main_tf(state, llm)
-        state.implementation.generated_code.append(GeneratedCode(
-            file_path="main.tf",
-            content=main_tf,
-            module_type="main",
-            validated=False
-        ))
-        
-        # Generate variables.tf
-        variables_tf = generate_variables_tf(state, llm)
-        state.implementation.generated_code.append(GeneratedCode(
-            file_path="variables.tf",
-            content=variables_tf,
-            module_type="variables",
-            validated=False
-        ))
-        
-        # Generate outputs.tf
-        outputs_tf = generate_outputs_tf(state, llm)
-        state.implementation.generated_code.append(GeneratedCode(
-            file_path="outputs.tf",
-            content=outputs_tf,
-            module_type="outputs",
-            validated=False
-        ))
-        
-        # Generate provider.tf
-        provider_tf = generate_provider_tf(state)
-        state.implementation.generated_code.append(GeneratedCode(
-            file_path="provider.tf",
-            content=provider_tf,
-            module_type="provider",
-            validated=False
-        ))
-        
-        # Generate terraform.tfvars
+        t0 = time.time()
+        region = getattr(state, "target_region", None) or "us-ashburn-1"
+        project_name = f"migration-{state.migration_id[:8]}"
+        log_node_entry(state.migration_id, "implementation", "terraform_code_generation", {
+            "project_name": project_name,
+            "region": region,
+            "components": len(state.design.architecture_components),
+            "modules": len(state.implementation.terraform_modules),
+        })
+
+        # ── Step 1: MCP-generated base project ───────────────────────────────
+        t_mcp = time.time()
+        project = terraform_gen_server.generate_three_tier_project(
+            project_name=project_name,
+            region=region,
+        )
+        mcp_ms = (time.time() - t_mcp) * 1000
+        log_mcp_call(
+            state.migration_id,
+            "terraform_gen_server",
+            "generate_three_tier_project",
+            inputs={"project_name": project_name, "region": region},
+            result={
+                "files_generated": len(project.get("files", {})),
+                "file_names": str(list(project.get("files", {}).keys())),
+            },
+            duration_ms=mcp_ms,
+        )
+
+        # Determine module_type for each standard file
+        _file_module_map = {
+            "provider.tf": "provider",
+            "variables.tf": "variables",
+            "outputs.tf": "outputs",
+            "network.tf": "resource",
+            "security.tf": "resource",
+            "compute.tf": "resource",
+            "database.tf": "resource",
+            "load_balancer.tf": "resource",
+        }
+
+        for fname, content in project.get("files", {}).items():
+            state.implementation.generated_code.append(GeneratedCode(
+                file_path=fname,
+                content=content,
+                module_type=_file_module_map.get(fname, "resource"),
+                validated=False,
+            ))
+
+        # ── Step 2: terraform.tfvars with real migration values ───────────────
         tfvars = generate_tfvars(state)
         state.implementation.generated_code.append(GeneratedCode(
             file_path="terraform.tfvars",
             content=tfvars,
             module_type="variables",
-            validated=False
+            validated=False,
         ))
-        
-        # Generate component-specific files
-        for component in state.design.architecture_components[:5]:  # Top 5 for demonstration
-            component_tf = generate_component_tf(state, component, llm)
-            state.implementation.generated_code.append(GeneratedCode(
-                file_path=f"{component.component_id}.tf",
-                content=component_tf,
-                module_type="resource",
-                validated=False
-            ))
-        
-        logger.info(f"Generated {len(state.implementation.generated_code)} Terraform files")
-        
+
+        # ── Step 3: Extra resources for non-standard components (LLM) ─────────
+        standard_services = {
+            "Compute", "Load Balancer", "VCN", "Subnet",
+            "Internet Gateway", "NAT Gateway", "Autonomous Database",
+            "Object Storage", "Security List", "Network Security Group",
+        }
+        extra_components = [
+            c for c in state.design.architecture_components
+            if c.oci_service and c.oci_service not in standard_services
+        ]
+
+        if extra_components:
+            llm = get_llm()
+            for component in extra_components[:3]:  # cap at 3 to avoid latency
+                # Try MCP resource template first; fall back to LLM
+                oci_resource_type = component.configuration.get("terraform_resource", "")
+                if oci_resource_type:
+                    t_res = time.time()
+                    resource_result = terraform_gen_server.generate_resource(
+                        resource_type=oci_resource_type,
+                        resource_name=component.component_id,
+                        params=component.configuration,
+                    )
+                    log_mcp_call(
+                        state.migration_id,
+                        "terraform_gen_server",
+                        "generate_resource",
+                        inputs={
+                            "resource_type": oci_resource_type,
+                            "resource_name": component.component_id,
+                        },
+                        result={
+                            "template_found": resource_result.get("template_found", False),
+                            "content_chars": len(resource_result.get("content", "")),
+                        },
+                        duration_ms=(time.time() - t_res) * 1000,
+                    )
+                    if resource_result.get("template_found"):
+                        state.implementation.generated_code.append(GeneratedCode(
+                            file_path=f"{component.component_id}.tf",
+                            content=resource_result["content"],
+                            module_type="resource",
+                            validated=False,
+                        ))
+                        continue
+
+                # LLM fallback for truly custom components
+                t_llm = time.time()
+                component_tf = generate_component_tf(state, component, llm)
+                log_llm_call(
+                    state.migration_id,
+                    "terraform_code_generation",
+                    prompt_preview=(
+                        f"component={component.name}, type={component.component_type}, "
+                        f"service={component.oci_service}"
+                    ),
+                    response_preview=f"tf_chars={len(component_tf)}, file={component.component_id}.tf",
+                    duration_ms=(time.time() - t_llm) * 1000,
+                )
+                state.implementation.generated_code.append(GeneratedCode(
+                    file_path=f"{component.component_id}.tf",
+                    content=component_tf,
+                    module_type="resource",
+                    validated=False,
+                ))
+
+        log_node_exit(state.migration_id, "implementation", "terraform_code_generation", {
+            "total_files_generated": len(state.implementation.generated_code),
+            "mcp_base_files": len(project.get("files", {})),
+            "extra_components": len(extra_components),
+            "file_names": str([c.file_path for c in state.implementation.generated_code]),
+        }, duration_ms=(time.time() - t0) * 1000)
         return state
-        
+
     except Exception as e:
-        logger.error(f"Terraform code generation failed: {str(e)}")
+        log_error(state.migration_id, "terraform_codegen_error", str(e), phase="implementation")
         state.errors.append(f"Code generation error: {str(e)}")
         return state
 
@@ -537,10 +626,13 @@ def code_validation(state: MigrationState) -> MigrationState:
         Updated state with validation results
     """
     try:
-        logger.info(f"Validating Terraform code for migration {state.migration_id}")
-        
+        t0 = time.time()
+        log_node_entry(state.migration_id, "implementation", "code_validation", {
+            "files_to_validate": len(state.implementation.generated_code),
+        })
+
         all_valid = True
-        
+
         for code in state.implementation.generated_code:
             # Basic validation checks
             validation_errors = []
@@ -572,16 +664,18 @@ def code_validation(state: MigrationState) -> MigrationState:
                 code.validation_errors = []
         
         state.implementation.code_validated = all_valid
-        
-        if all_valid:
-            logger.info("All Terraform code validated successfully")
-        else:
-            logger.warning("Some Terraform files have validation issues")
-        
+
+        invalid_files = [c.file_path for c in state.implementation.generated_code if not c.validated]
+        log_node_exit(state.migration_id, "implementation", "code_validation", {
+            "files_validated": len(state.implementation.generated_code),
+            "all_valid": all_valid,
+            "invalid_files": str(invalid_files),
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Code validation failed: {str(e)}")
+        log_error(state.migration_id, "code_validation_error", str(e), phase="implementation")
         state.errors.append(f"Code validation error: {str(e)}")
         return state
 
@@ -598,8 +692,12 @@ def project_export(state: MigrationState) -> MigrationState:
         Updated state with export path
     """
     try:
-        logger.info(f"Exporting Terraform project for migration {state.migration_id}")
-        
+        t0 = time.time()
+        log_node_entry(state.migration_id, "implementation", "project_export", {
+            "files_to_export": len(state.implementation.generated_code),
+            "code_validated": state.implementation.code_validated,
+        })
+
         # Create export directory
         export_dir = Path(config.app.export_dir) / state.migration_id
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -640,13 +738,17 @@ This Terraform project was auto-generated by the Cloud Migration Agent.
         
         state.implementation.project_exported = True
         state.implementation.export_path = str(export_dir)
-        
-        logger.info(f"Project exported to: {export_dir}")
-        
+
+        log_node_exit(state.migration_id, "implementation", "project_export", {
+            "export_path": str(export_dir),
+            "files_written": len(state.implementation.generated_code),
+            "readme_written": True,
+        }, duration_ms=(time.time() - t0) * 1000)
+
         return state
-        
+
     except Exception as e:
-        logger.error(f"Project export failed: {str(e)}")
+        log_error(state.migration_id, "project_export_error", str(e), phase="implementation")
         state.errors.append(f"Project export error: {str(e)}")
         return state
 
@@ -1214,7 +1316,12 @@ def prepare_implementation_review(state: MigrationState) -> MigrationState:
         Updated state ready for implementation review
     """
     try:
-        logger.info(f"Preparing implementation review for migration {state.migration_id}")
+        t0 = time.time()
+        log_node_entry(state.migration_id, "implementation", "prepare_implementation_review", {
+            "strategy": state.implementation.strategy.value if state.implementation.strategy else "unknown",
+            "code_validated": state.implementation.code_validated,
+            "project_exported": state.implementation.project_exported,
+        })
 
         strategy = state.implementation.strategy
 
@@ -1241,16 +1348,17 @@ def prepare_implementation_review(state: MigrationState) -> MigrationState:
 
         state.phase_status = PhaseStatus.WAITING_REVIEW
 
-        state.messages.append({
-            "role": "system",
-            "content": " | ".join(summary_parts)
-        })
+        summary = " | ".join(summary_parts)
+        state.messages.append({"role": "system", "content": summary})
 
-        logger.info("Implementation review preparation complete")
+        log_node_exit(state.migration_id, "implementation", "prepare_implementation_review", {
+            "phase_status": "WAITING_REVIEW",
+            "summary": summary,
+        }, duration_ms=(time.time() - t0) * 1000)
         return state
 
     except Exception as e:
-        logger.error(f"Implementation review prep failed: {str(e)}")
+        log_error(state.migration_id, "impl_review_prep_error", str(e), phase="implementation")
         state.errors.append(f"Implementation review prep error: {str(e)}")
         return state
 

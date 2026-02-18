@@ -7,9 +7,12 @@ integration with OpenTelemetry for tracing.
 
 import logging
 import sys
-from typing import Optional
+from typing import Any, Dict, Optional
 from datetime import datetime
 from pythonjsonlogger import jsonlogger
+
+# Maximum characters logged for large text fields (prompts, responses, TF code)
+_MAX_PREVIEW = 800
 
 
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
@@ -163,5 +166,115 @@ def log_error(
     }
     if phase:
         extra["phase"] = phase
-    
+
     log.error("Error occurred", extra=extra)
+
+
+# ── NEW: Workflow observability helpers ──────────────────────────────────────
+
+
+def log_node_entry(
+    migration_id: str,
+    phase: str,
+    node: str,
+    inputs: Optional[Dict[str, Any]] = None,
+    logger_instance: Optional[logging.Logger] = None,
+) -> None:
+    """Log node entry with key input fields for workflow tracing."""
+    _log = logger_instance or logger
+    _log.info(
+        f"[{phase.upper()}:{node}] ENTER",
+        extra={
+            "event_type": "node_entry",
+            "migration_id": migration_id,
+            "phase": phase,
+            "node": node,
+            "inputs": {k: str(v)[:200] for k, v in (inputs or {}).items()},
+        },
+    )
+
+
+def log_node_exit(
+    migration_id: str,
+    phase: str,
+    node: str,
+    outputs: Optional[Dict[str, Any]] = None,
+    duration_ms: Optional[float] = None,
+    logger_instance: Optional[logging.Logger] = None,
+) -> None:
+    """Log node exit with key output fields and wall-clock duration."""
+    _log = logger_instance or logger
+    dur = f" [{duration_ms:.0f}ms]" if duration_ms is not None else ""
+    _log.info(
+        f"[{phase.upper()}:{node}] EXIT{dur}",
+        extra={
+            "event_type": "node_exit",
+            "migration_id": migration_id,
+            "phase": phase,
+            "node": node,
+            "outputs": {k: str(v)[:200] for k, v in (outputs or {}).items()},
+            "duration_ms": round(duration_ms, 1) if duration_ms is not None else None,
+        },
+    )
+
+
+def log_mcp_call(
+    migration_id: str,
+    server: str,
+    method: str,
+    inputs: Optional[Dict[str, Any]] = None,
+    result: Optional[Dict[str, Any]] = None,
+    duration_ms: Optional[float] = None,
+    logger_instance: Optional[logging.Logger] = None,
+) -> None:
+    """Log an MCP server invocation — inputs, result summary, and latency."""
+    _log = logger_instance or logger
+
+    def _summarise(d: Optional[Dict]) -> Dict:
+        if not d:
+            return {}
+        out = {}
+        for k, v in d.items():
+            sv = str(v)
+            out[k] = sv[:300] if len(sv) > 300 else sv
+        return out
+
+    dur = f" [{duration_ms:.0f}ms]" if duration_ms is not None else ""
+    _log.info(
+        f"[MCP:{server}.{method}]{dur}",
+        extra={
+            "event_type": "mcp_call",
+            "migration_id": migration_id,
+            "mcp_server": server,
+            "mcp_method": method,
+            "mcp_inputs": _summarise(inputs),
+            "mcp_result": _summarise(result),
+            "duration_ms": round(duration_ms, 1) if duration_ms is not None else None,
+        },
+    )
+
+
+def log_llm_call(
+    migration_id: str,
+    node: str,
+    prompt_preview: str = "",
+    response_preview: str = "",
+    duration_ms: Optional[float] = None,
+    logger_instance: Optional[logging.Logger] = None,
+) -> None:
+    """Log an LLM invocation — prompt preview, response preview, and latency."""
+    _log = logger_instance or logger
+    dur = f" [{duration_ms:.0f}ms]" if duration_ms is not None else ""
+    _log.info(
+        f"[LLM:{node}]{dur}",
+        extra={
+            "event_type": "llm_call",
+            "migration_id": migration_id,
+            "node": node,
+            "prompt_chars": len(prompt_preview),
+            "prompt_preview": prompt_preview[:_MAX_PREVIEW],
+            "response_chars": len(response_preview),
+            "response_preview": response_preview[:_MAX_PREVIEW],
+            "duration_ms": round(duration_ms, 1) if duration_ms is not None else None,
+        },
+    )
