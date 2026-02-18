@@ -9,95 +9,31 @@ import json
 from typing import Optional, Dict, Any
 from datetime import datetime
 
+from langgraph.checkpoint.memory import MemorySaver
+
 from src.models.state_schema import MigrationState
 from src.utils.config import config
 from src.utils.logger import logger
 
 
-class InMemoryCheckpointSaver:
+class InMemoryCheckpointSaver(MemorySaver):
     """
     In-memory checkpoint saver fallback.
 
+    Extends LangGraph's MemorySaver with helpers for migration state access.
     Used when Oracle DB is not available.
     """
 
     def __init__(self):
-        self._checkpoints: Dict[str, list] = {}
-        self._migrations: Dict[str, Dict[str, Any]] = {}
+        super().__init__()
+        self._migration_states: Dict[str, MigrationState] = {}
         logger.info("Using in-memory checkpoint saver (no Oracle DB)")
 
-    def put(
-        self,
-        config_dict: Dict[str, Any],
-        checkpoint: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        migration_id = config_dict.get("configurable", {}).get("migration_id")
-        if not migration_id:
-            raise ValueError("migration_id required in config")
-
-        checkpoint_id = f"{migration_id}_{datetime.utcnow().isoformat()}"
-        state_data = checkpoint.get("channel_values", {})
-        node = checkpoint.get("node", "unknown")
-        phase = state_data.get("current_phase", "unknown")
-
-        entry = {
-            "checkpoint_id": checkpoint_id,
-            "migration_id": migration_id,
-            "phase": phase,
-            "node": node,
-            "state_data": state_data,
-            "metadata": metadata,
-            "created_at": datetime.utcnow().isoformat()
-        }
-
-        if migration_id not in self._checkpoints:
-            self._checkpoints[migration_id] = []
-        self._checkpoints[migration_id].append(entry)
-
-        return {
-            "configurable": {
-                "migration_id": migration_id,
-                "checkpoint_id": checkpoint_id
-            }
-        }
-
-    def get(self, config_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        migration_id = config_dict.get("configurable", {}).get("migration_id")
-        if not migration_id or migration_id not in self._checkpoints:
-            return None
-
-        entries = self._checkpoints[migration_id]
-        if not entries:
-            return None
-
-        latest = entries[-1]
-        return {
-            "checkpoint_id": latest["checkpoint_id"],
-            "node": latest["node"],
-            "channel_values": latest["state_data"],
-            "metadata": latest.get("metadata", {}),
-            "created_at": latest["created_at"]
-        }
-
-    def list(self, config_dict: Dict[str, Any], limit: int = 10) -> list:
-        migration_id = config_dict.get("configurable", {}).get("migration_id")
-        if not migration_id or migration_id not in self._checkpoints:
-            return []
-        entries = self._checkpoints[migration_id]
-        return list(reversed(entries[-limit:]))
-
     def get_migration_state(self, migration_id: str) -> Optional[MigrationState]:
-        checkpoint = self.get({"configurable": {"migration_id": migration_id}})
-        if checkpoint:
-            return MigrationState(**checkpoint["channel_values"])
-        return None
+        return self._migration_states.get(migration_id)
 
     def save_migration_state(self, migration_id: str, state: MigrationState, node: str = "manual_save"):
-        self.put(
-            config_dict={"configurable": {"migration_id": migration_id}},
-            checkpoint={"node": node, "channel_values": state.model_dump()}
-        )
+        self._migration_states[migration_id] = state
 
     def close(self):
         pass

@@ -15,7 +15,11 @@ except Exception as _e:
     GRADIO_AVAILABLE = False
     _IMPORT_ERROR = _e
 
-API_BASE = "http://localhost:8000"
+try:
+    from src.utils.config import config as _cfg
+    API_BASE = f"http://localhost:{_cfg.api.port}"
+except Exception:
+    API_BASE = "http://localhost:8000"
 
 
 def _post(endpoint: str, data: dict = None, params: dict = None) -> Tuple[bool, Any]:
@@ -42,7 +46,7 @@ def create_ui():
             "Install with: pip install gradio requests"
         ) from _IMPORT_ERROR
 
-    with gr.Blocks(title="Cloud Migration Agent v4.0.0", theme=gr.themes.Soft(primary_hue="orange")) as app:
+    with gr.Blocks(title="Cloud Migration Agent v4.0.0") as app:
 
         gr.HTML("""<div style="background:linear-gradient(135deg,#C74634,#F80000);color:white;padding:20px;border-radius:8px;margin-bottom:20px;">
             <h1>Cloud Migration Agent Platform v4.0.0</h1>
@@ -68,9 +72,9 @@ def create_ui():
                 def start_migration(c, p, r):
                     ok, result = _post("/migrations", {"user_context": c, "source_provider": p, "target_region": r})
                     mid = result.get("migration_id", "") if ok else ""
-                    return result, mid
+                    return result, mid, mid
 
-                start_btn.click(start_migration, [ctx, provider, region], [start_out, migration_id])
+                start_btn.click(start_migration, [ctx, provider, region], [start_out, migration_id, mid_display])
 
                 gr.Markdown("### Submit Clarifications")
                 clarif = gr.Textbox(label='Clarifications (JSON)', placeholder='{"vpc_count": "3 VPCs"}', lines=2)
@@ -263,4 +267,4 @@ def create_ui():
 
 if __name__ == "__main__":
     ui = create_ui()
-    ui.launch(server_name="0.0.0.0", server_port=7860)
+    ui.launch(server_name="0.0.0.0", server_port=7860, theme=gr.themes.Soft(primary_hue="orange"))

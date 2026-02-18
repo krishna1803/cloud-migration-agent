@@ -1,5 +1,5 @@
 # Cloud Migration Agent Platform v4.0.0
-# Python 3.12 compatible. Uses >= lower bounds so pip always resolves to the
+# Python 3.12/3.13 compatible. Uses >= lower bounds so pip always resolves to the
 # latest compatible set rather than failing on exact-pinned conflicts.
 
 # ── Core LangGraph / LangChain Framework ────────────────────────────────────
@@ -23,9 +23,9 @@ faiss-cpu>=1.8.0
 # ── Web Framework ─────────────────────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.31.0
-# Capped below 5.0 because the Gradio UI in src/ui/app.py targets the 4.x API.
-# Upgrade to gradio>=5.0.0 only after updating src/ui/app.py for 5.x changes.
-gradio>=4.44.0,<5.0.0
+# Gradio 6.x required for Python 3.13 compatibility (audioop removed in 3.13).
+gradio>=6.0.0
+huggingface_hub>=1.0.0
 
 # ── Document Processing ───────────────────────────────────────────────────────
 pypdf>=4.3.1

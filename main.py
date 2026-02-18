@@ -5,12 +5,21 @@ Main entry point for the API server and UI.
 
 import argparse
 import sys
+from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import router
 from src.utils.logger import logger
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Cloud Migration Agent Platform v4.0.0 starting up")
+    logger.info("API docs available at: http://localhost:8000/docs")
+    yield
+    logger.info("Cloud Migration Agent Platform shutting down")
 
 
 def create_app() -> FastAPI:
@@ -21,6 +30,7 @@ def create_app() -> FastAPI:
         version="4.0.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     app.add_middleware(
@@ -32,15 +42,6 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(router)
-
-    @app.on_event("startup")
-    async def startup_event():
-        logger.info("Cloud Migration Agent Platform v4.0.0 starting up")
-        logger.info("API docs available at: http://localhost:8000/docs")
-
-    @app.on_event("shutdown")
-    async def shutdown_event():
-        logger.info("Cloud Migration Agent Platform shutting down")
 
     return app
 
@@ -62,10 +63,11 @@ def run_api(host: str = "0.0.0.0", port: int = 8000, reload: bool = False):
 def run_ui(host: str = "0.0.0.0", port: int = 7860):
     """Run the Gradio UI."""
     try:
+        import gradio as gr
         from src.ui.app import create_ui
         ui = create_ui()
         logger.info(f"Starting Gradio UI on {host}:{port}")
-        ui.launch(server_name=host, server_port=port, share=False)
+        ui.launch(server_name=host, server_port=port, share=False, theme=gr.themes.Soft(primary_hue="orange"))
     except ImportError as e:
         logger.error(f"Could not start UI: {e}")
         print(f"Error: {e}")

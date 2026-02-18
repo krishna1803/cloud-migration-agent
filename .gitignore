@@ -29,9 +29,12 @@ env/
 
 # Test / coverage artifacts
 .pytest_cache/
+*.pyc
+*/__pycache__
 .coverage
 htmlcov/
 coverage.xml
+*/__pycache__/*
 
 # Uploads / exports / checkpoints (runtime data)
 uploads/
