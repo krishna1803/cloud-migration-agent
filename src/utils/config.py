@@ -32,6 +32,9 @@ class GenAIConfig(BaseSettings):
         default="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
         alias="OCI_GENAI_ENDPOINT"
     )
+    # model_type selects which backend to use: "gemini" (Google Gemini via OCI)
+    # or "cohere" (Cohere Command R+ via OCI).  Set OCI_GENAI_MODEL_TYPE in .env.
+    model_type: str = Field(default="gemini", alias="OCI_GENAI_MODEL_TYPE")
     model_id: str = Field(default="cohere.command-r-plus", alias="OCI_GENAI_MODEL_ID")
     embedding_model_id: str = Field(
         default="cohere.embed-english-v3.0",
@@ -39,6 +42,8 @@ class GenAIConfig(BaseSettings):
     )
     max_tokens: int = Field(default=4096, alias="OCI_GENAI_MAX_TOKENS")
     temperature: float = Field(default=0.1, alias="OCI_GENAI_TEMPERATURE")
+    top_p: float = Field(default=0.95, alias="OCI_GENAI_TOP_P")
+    top_k: int = Field(default=1, alias="OCI_GENAI_TOP_K")
 
     class Config:
         env_file = ".env"

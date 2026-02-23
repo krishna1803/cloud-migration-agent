@@ -287,9 +287,26 @@ class OCIGenAIEmbeddings(Embeddings):
 
 
 # Convenience functions
-def get_llm(**kwargs) -> OCIGenAI:
-    """Get OCI GenAI LLM instance"""
-    return OCIGenAI(**kwargs)
+def get_llm(**kwargs):
+    """
+    Return the configured LLM instance.
+
+    Which backend is used is controlled by ``OCI_GENAI_MODEL_TYPE`` in .env:
+
+    * ``"gemini"`` (default) – Google Gemini Pro via OCI GenAI using
+      :class:`src.llm.gemini_wrapper.GeminiLangChainWrapper`.
+    * ``"cohere"`` – Cohere Command R+ via OCI GenAI using :class:`OCIGenAI`.
+
+    All keyword arguments are forwarded to the chosen class constructor,
+    allowing callers to override individual parameters (model_id, temperature,
+    max_tokens, …) at runtime.
+    """
+    model_type = config.genai.model_type.lower()
+    if model_type == "gemini":
+        from src.llm.gemini_wrapper import GeminiLangChainWrapper
+        return GeminiLangChainWrapper(**kwargs)
+    else:
+        return OCIGenAI(**kwargs)
 
 
 def get_embeddings(**kwargs) -> OCIGenAIEmbeddings:
