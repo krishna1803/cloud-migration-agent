@@ -813,6 +813,262 @@ For issues or questions, contact your OCI support team or migration specialist.
     return report
 
 
+# Phase 6.5 Node: Package Deliverables
+def package_deliverables(state: MigrationState) -> MigrationState:
+    """
+    Phase 6.5: Package Deliverables.
+
+    Bundles all migration artefacts — diagrams, deployment report, runbook,
+    and Terraform archive — into a single deliverables package and records
+    the paths in state.deliverables_package.
+    """
+    try:
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "package_deliverables", {
+            "diagrams": len(state.design.diagrams),
+            "tf_files": len(state.implementation.generated_code),
+            "report_path": state.deployment.deployment_report_path,
+        })
+
+        deliverables_dir = Path(config.app.export_dir) / state.migration_id / "deliverables"
+        deliverables_dir.mkdir(parents=True, exist_ok=True)
+
+        bundle: dict = {
+            "migration_id": state.migration_id,
+            "generated_at": datetime.utcnow().isoformat(),
+            "items": [],
+        }
+
+        # 1. Deployment report
+        if state.deployment.deployment_report_path:
+            report_src = Path(state.deployment.deployment_report_path)
+            if report_src.exists():
+                import shutil
+                dest = deliverables_dir / "deployment_report.md"
+                shutil.copy2(report_src, dest)
+                bundle["items"].append({
+                    "type": "deployment_report",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+
+        # 2. Architecture diagrams
+        for i, diagram in enumerate(state.design.diagrams):
+            diag_path = deliverables_dir / f"diagram_{i+1}_{diagram.diagram_type}.{diagram.format}"
+            diag_path.write_text(diagram.diagram_data or "# Diagram placeholder")
+            bundle["items"].append({
+                "type": "diagram",
+                "diagram_type": diagram.diagram_type,
+                "format": diagram.format,
+                "path": str(diag_path),
+            })
+
+        # 3. Runbook (generated from deployment state)
+        runbook_content = _generate_runbook(state)
+        runbook_path = deliverables_dir / "runbook.md"
+        runbook_path.write_text(runbook_content)
+        bundle["items"].append({
+            "type": "runbook",
+            "path": str(runbook_path),
+            "size_bytes": runbook_path.stat().st_size,
+        })
+
+        # 4. Terraform archive (ZIP)
+        if state.implementation.generated_code:
+            tf_zip_path = deliverables_dir / f"terraform-{state.migration_id[:8]}.zip"
+            with zipfile.ZipFile(tf_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for code in state.implementation.generated_code:
+                    zf.writestr(code.file_path, code.content)
+            bundle["items"].append({
+                "type": "terraform_archive",
+                "path": str(tf_zip_path),
+                "file_count": len(state.implementation.generated_code),
+                "size_bytes": tf_zip_path.stat().st_size,
+            })
+
+        # 5. Bundle manifest
+        manifest_path = deliverables_dir / "manifest.json"
+        import json
+        manifest_path.write_text(json.dumps(bundle, indent=2))
+        bundle["manifest_path"] = str(manifest_path)
+
+        state.deliverables_package = bundle
+        state.deliverables_package_status = "completed"
+
+        state.messages.append({
+            "role": "system",
+            "content": (
+                f"Deliverables packaged: {len(bundle['items'])} artefacts in "
+                f"{deliverables_dir}"
+            ),
+        })
+
+        log_node_exit(state.migration_id, "deployment", "package_deliverables", {
+            "item_count": len(bundle["items"]),
+            "deliverables_dir": str(deliverables_dir),
+        }, duration_ms=(time.time() - t0) * 1000)
+
+        return state
+
+    except Exception as e:
+        log_error(state.migration_id, "package_deliverables_error", str(e), phase="deployment")
+        state.errors.append(f"Package deliverables error: {str(e)}")
+        state.deliverables_package_status = "failed"
+        return state
+
+
+def _generate_runbook(state: MigrationState) -> str:
+    """Generate a concise operations runbook from the migration state."""
+    lines = [
+        f"# Migration Runbook — {state.migration_id}",
+        "",
+        f"**Source:** {state.source_provider}  ",
+        f"**Target Region:** {state.target_region}  ",
+        f"**Generated:** {datetime.utcnow().isoformat()}",
+        "",
+        "## Pre-Deployment Checklist",
+    ]
+    for v in state.deployment.pre_validation_results:
+        mark = "✅" if v.passed else "❌"
+        lines.append(f"- {mark} {v.check_name}: {v.details}")
+
+    lines += [
+        "",
+        "## Deployment Steps",
+        f"1. OCI Resource Manager Stack: `{state.deployment.stack_id or 'N/A'}`",
+        "2. Run Terraform plan and review output.",
+        "3. Approve and execute Terraform apply.",
+        "4. Monitor deployment progress in OCI Console.",
+        "",
+        "## Post-Deployment Checklist",
+    ]
+    for v in state.deployment.post_validation_results:
+        mark = "✅" if v.passed else "❌"
+        lines.append(f"- {mark} {v.check_name}: {v.details}")
+
+    lines += [
+        "",
+        "## Rollback Procedure",
+        "1. Destroy stack in OCI Resource Manager.",
+        "2. Restore from source environment snapshot if available.",
+        "3. Notify stakeholders.",
+        "",
+        "## Support Contacts",
+        "- OCI Support: https://support.oracle.com",
+        "- Internal escalation: migration-ops@example.com",
+    ]
+    return "\n".join(lines)
+
+
+# Phase 6 Final Node: Data Lineage
+_LINEAGE_FIELDS = [
+    ("user_context", "discovery", "Phase 1 input"),
+    ("source_provider", "discovery", "Source cloud provider"),
+    ("target_region", "discovery", "OCI target region"),
+    ("discovered_services", "discovery", "Services identified in Phase 1"),
+    ("service_mappings", "analysis", "OCI service mappings from Phase 2"),
+    ("sizing_recommendations", "analysis", "Compute sizing from Phase 2"),
+    ("pricing_estimates", "analysis", "Cost estimates from Phase 2"),
+    ("architecture_components", "design", "Architecture components from Phase 3"),
+    ("diagrams", "design", "Diagrams generated in Phase 3"),
+    ("compliance_frameworks", "security", "Compliance frameworks from Phase 1.9"),
+    ("dependency_analysis", "dependency", "Deployment wave plan from Phase 1.10"),
+    ("generated_code", "implementation", "Terraform code from Phase 5"),
+    ("terraform_plan", "deployment", "Terraform plan from Phase 6"),
+    ("deployment_jobs", "deployment", "OCI RM jobs from Phase 6"),
+    ("deliverables_package", "deliverables", "Packaged artefacts from Phase 6.5"),
+    ("errors", "audit", "Error log across all phases"),
+]
+
+
+def data_lineage(state: MigrationState) -> MigrationState:
+    """
+    Phase 6 Final: Data Lineage Provenance Report.
+
+    Captures the full provenance of all 16 key state fields, recording
+    what data was produced, in which phase, and its current status.
+    Stored in state.data_lineage_report for audit and debugging.
+    """
+    try:
+        t0 = time.time()
+        log_node_entry(state.migration_id, "deployment", "data_lineage", {
+            "lineage_fields": len(_LINEAGE_FIELDS),
+        })
+
+        records = []
+        for field_name, phase, description in _LINEAGE_FIELDS:
+            # Resolve field value from nested state objects
+            value = None
+            if hasattr(state, field_name):
+                value = getattr(state, field_name)
+            elif hasattr(state.discovery, field_name):
+                value = getattr(state.discovery, field_name)
+            elif hasattr(state.analysis, field_name):
+                value = getattr(state.analysis, field_name)
+            elif hasattr(state.design, field_name):
+                value = getattr(state.design, field_name)
+            elif hasattr(state.implementation, field_name):
+                value = getattr(state.implementation, field_name)
+            elif hasattr(state.deployment, field_name):
+                value = getattr(state.deployment, field_name)
+
+            # Summarize the value without serializing large payloads
+            if isinstance(value, list):
+                summary = f"list({len(value)} items)"
+            elif isinstance(value, dict):
+                summary = f"dict({len(value)} keys)"
+            elif isinstance(value, str):
+                summary = f"str({len(value)} chars)" if len(value) > 80 else value
+            else:
+                summary = str(value)[:120] if value is not None else "null"
+
+            records.append({
+                "field": field_name,
+                "phase": phase,
+                "description": description,
+                "present": value is not None and value != [] and value != {},
+                "summary": summary,
+            })
+
+        report = {
+            "migration_id": state.migration_id,
+            "captured_at": datetime.utcnow().isoformat(),
+            "source_provider": state.source_provider,
+            "target_region": state.target_region,
+            "total_fields": len(records),
+            "populated_fields": sum(1 for r in records if r["present"]),
+            "records": records,
+            "compliance_frameworks": state.compliance_frameworks,
+            "dependency_waves": state.dependency_analysis.get("total_waves", 0),
+            "deliverables_count": len(state.deliverables_package.get("items", [])),
+            "errors_count": len(state.errors),
+        }
+
+        state.data_lineage_report = report
+        state.data_lineage_status = "completed"
+
+        state.messages.append({
+            "role": "system",
+            "content": (
+                f"Data lineage captured: {report['populated_fields']}/{report['total_fields']} "
+                f"fields populated across {len({r['phase'] for r in records})} phases."
+            ),
+        })
+
+        log_node_exit(state.migration_id, "deployment", "data_lineage", {
+            "total_fields": report["total_fields"],
+            "populated_fields": report["populated_fields"],
+        }, duration_ms=(time.time() - t0) * 1000)
+
+        return state
+
+    except Exception as e:
+        log_error(state.migration_id, "data_lineage_error", str(e), phase="deployment")
+        state.errors.append(f"Data lineage error: {str(e)}")
+        state.data_lineage_status = "failed"
+        return state
+
+
 # Phase 6 Completion Node
 def deployment_complete(state: MigrationState) -> MigrationState:
     """

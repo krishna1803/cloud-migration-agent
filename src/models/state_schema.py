@@ -2,7 +2,7 @@
 State schema for the Cloud Migration Agent Platform.
 
 Defines the complete state structure that flows through all 6 phases
-of the migration workflow. Aligned with spec v4.0.0.
+of the migration workflow. Aligned with spec v4.2.0.
 """
 
 from typing import Dict, List, Optional, Any, Literal
@@ -355,6 +355,30 @@ class MigrationState(BaseModel):
     # Feature Flags
     risk_analysis_requested: bool = False
     cost_optimization_requested: bool = False
+
+    # v4.2.0: Phase 1.9 — Security Posture Configuration
+    # Compliance frameworks selected by the user (e.g. cis, hipaa, pci_dss, soc2, gdpr, iso27001, fedramp)
+    compliance_frameworks: List[str] = Field(default_factory=list)
+    compliance_frameworks_status: str = "pending"
+
+    # v4.2.0: Phase 1.10 — Dependency Analysis Configuration
+    # User-supplied constraints (excluded_services, manual_overrides, deployment_wave_size, force_sequential)
+    dependency_constraints: Dict[str, Any] = Field(default_factory=dict)
+    # Output from DependencyAnalysisServer (waves, conflicts, diagram, timeline)
+    dependency_analysis: Dict[str, Any] = Field(default_factory=dict)
+    dependency_analysis_status: str = "pending"
+    # Record of constraints applied with counts
+    applied_constraints: Dict[str, Any] = Field(default_factory=dict)
+
+    # v4.2.0: Phase 6.5 — Deliverables Package
+    # Bundle containing diagrams, report, runbook, and Terraform archive paths
+    deliverables_package: Dict[str, Any] = Field(default_factory=dict)
+    deliverables_package_status: str = "pending"
+
+    # v4.2.0: Final Phase 6 — Data Lineage Provenance Report
+    # Full provenance tracking across all 16 state lineage fields
+    data_lineage_report: Dict[str, Any] = Field(default_factory=dict)
+    data_lineage_status: str = "pending"
 
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}

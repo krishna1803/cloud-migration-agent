@@ -16,7 +16,9 @@ from src.agents.phase1_discovery import (
     extract_evidence,
     gap_detection,
     clarifications_needed,
-    should_request_clarifications
+    should_request_clarifications,
+    security_posture_config,
+    dependency_analysis_config,
 )
 from src.agents.review_gates import (
     discovery_review_gate,
@@ -75,7 +77,9 @@ from src.agents.phase6_deployment import (
     monitor_deployment,
     post_deployment_validation,
     generate_deployment_report,
-    deployment_complete
+    package_deliverables,
+    data_lineage,
+    deployment_complete,
 )
 from src.utils.checkpoint import checkpoint_saver
 from src.utils.logger import logger
@@ -124,9 +128,17 @@ def create_migration_workflow() -> StateGraph:
     
     # ========== PHASE 1.5: DISCOVERY REVIEW GATE ==========
     workflow.add_node("discovery_review_gate", discovery_review_gate)
-    
-    # After discovery review, proceed to analysis
-    workflow.add_edge("discovery_review_gate", "reconstruct_current_state")
+
+    # ========== PHASE 1.9: SECURITY POSTURE CONFIGURATION ==========
+    workflow.add_node("security_posture_config", security_posture_config)
+
+    # ========== PHASE 1.10: DEPENDENCY ANALYSIS CONFIGURATION ==========
+    workflow.add_node("dependency_analysis_config", dependency_analysis_config)
+
+    # After discovery review → security posture → dependency analysis → analysis
+    workflow.add_edge("discovery_review_gate", "security_posture_config")
+    workflow.add_edge("security_posture_config", "dependency_analysis_config")
+    workflow.add_edge("dependency_analysis_config", "reconstruct_current_state")
     
     # ========== PHASE 2: ANALYSIS ==========
     workflow.add_node("reconstruct_current_state", reconstruct_current_state)
@@ -248,7 +260,10 @@ def create_migration_workflow() -> StateGraph:
 
     # ========== PHASE 5.5: CODE REVIEW GATE ==========
     workflow.add_node("code_review_gate", code_review_gate)
+    # After code review → convergence node → deployment (fix: removed duplicate edge)
     workflow.add_edge("code_review_gate", "prepare_implementation_review")
+    workflow.add_edge("prepare_implementation_review", "pre_deployment_validation")
+
     # ========== PHASE 6: DEPLOYMENT ==========
     workflow.add_node("pre_deployment_validation", pre_deployment_validation)
     workflow.add_node("create_rm_stack", create_rm_stack)
@@ -257,20 +272,25 @@ def create_migration_workflow() -> StateGraph:
     workflow.add_node("monitor_deployment", monitor_deployment)
     workflow.add_node("post_deployment_validation", post_deployment_validation)
     workflow.add_node("generate_deployment_report", generate_deployment_report)
+
+    # ========== PHASE 6.5: PLAN REVIEW GATE ==========
+    workflow.add_node("plan_review_gate", plan_review_gate)
+
+    # ========== PHASE 6.5: PACKAGE DELIVERABLES & DATA LINEAGE ==========
+    workflow.add_node("package_deliverables", package_deliverables)
+    workflow.add_node("data_lineage", data_lineage)
     workflow.add_node("deployment_complete", deployment_complete)
-    
-    workflow.add_edge("code_review_gate", "pre_deployment_validation")
+
     workflow.add_edge("pre_deployment_validation", "create_rm_stack")
     workflow.add_edge("create_rm_stack", "generate_terraform_plan")
     workflow.add_edge("generate_terraform_plan", "plan_review_gate")
-    
-    # ========== PHASE 6.5: PLAN REVIEW GATE ==========
-    workflow.add_node("plan_review_gate", plan_review_gate)
     workflow.add_edge("plan_review_gate", "execute_deployment")
     workflow.add_edge("execute_deployment", "monitor_deployment")
     workflow.add_edge("monitor_deployment", "post_deployment_validation")
     workflow.add_edge("post_deployment_validation", "generate_deployment_report")
-    workflow.add_edge("generate_deployment_report", "deployment_complete")
+    workflow.add_edge("generate_deployment_report", "package_deliverables")
+    workflow.add_edge("package_deliverables", "data_lineage")
+    workflow.add_edge("data_lineage", "deployment_complete")
     workflow.add_edge("deployment_complete", END)
     
     # Compile workflow with checkpointing

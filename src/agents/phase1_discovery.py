@@ -463,3 +463,265 @@ def should_request_clarifications(state: MigrationState) -> str:
         },
     )
     return decision
+
+
+# Phase 1.9 — Security Posture Configuration
+_KNOWN_FRAMEWORKS = {"cis", "hipaa", "pci_dss", "soc2", "gdpr", "iso27001", "fedramp"}
+
+
+def security_posture_config(state: MigrationState) -> MigrationState:
+    """
+    Phase 1.9: Security Posture Configuration.
+
+    Extracts compliance framework selections from the user context and
+    the security_posture discovered in Phase 1. Populates
+    state.compliance_frameworks with the applicable framework IDs.
+    """
+    t0 = time.time()
+    log_node_entry(state.migration_id, "discovery", "security_posture_config", {
+        "existing_compliance_requirements": (
+            state.discovery.security_posture.compliance_requirements
+            if state.discovery.security_posture else []
+        ),
+    })
+    try:
+        # Collect compliance signals from the user context and discovered security posture
+        ctx_lower = (state.user_context or "").lower()
+        discovered_requirements: List[str] = []
+        if state.discovery.security_posture:
+            discovered_requirements = [
+                r.lower() for r in state.discovery.security_posture.compliance_requirements
+            ]
+
+        selected: List[str] = []
+        for fw in _KNOWN_FRAMEWORKS:
+            if fw in ctx_lower or any(fw in r for r in discovered_requirements):
+                selected.append(fw)
+
+        # Try LLM extraction for richer detection
+        try:
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_core.output_parsers import JsonOutputParser
+
+            llm = get_llm()
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are a compliance expert. Identify which compliance frameworks
+                are required based on the user context and discovered security requirements.
+
+                Available frameworks: cis, hipaa, pci_dss, soc2, gdpr, iso27001, fedramp
+
+                Respond in JSON: {{"frameworks": ["cis", "hipaa", ...], "rationale": "..."}}
+                Only include frameworks that are clearly required or mentioned.
+                """),
+                ("user", "User context: {user_context}\nSecurity requirements: {requirements}")
+            ])
+
+            llm_t0 = time.time()
+            chain = prompt | llm | JsonOutputParser()
+            result = chain.invoke({
+                "user_context": state.user_context or "",
+                "requirements": str(discovered_requirements),
+            })
+            llm_duration = (time.time() - llm_t0) * 1000
+
+            llm_frameworks = [
+                fw for fw in result.get("frameworks", [])
+                if fw in _KNOWN_FRAMEWORKS
+            ]
+            # Merge keyword-detected and LLM-detected frameworks
+            selected = list(set(selected) | set(llm_frameworks))
+
+            log_llm_call(
+                state.migration_id, "security_posture_config",
+                prompt_preview=(
+                    f"[SYSTEM] Detect compliance frameworks. "
+                    f"Context: {str(state.user_context)[:200]}"
+                ),
+                response_preview=(
+                    f"frameworks={result.get('frameworks', [])}, "
+                    f"rationale={str(result.get('rationale', ''))[:100]}"
+                ),
+                duration_ms=llm_duration,
+            )
+        except Exception as e:
+            logger.warning(f"LLM compliance detection failed, using keyword fallback: {e}")
+
+        state.compliance_frameworks = selected
+        state.compliance_frameworks_status = "completed"
+
+        state.messages.append({
+            "role": "system",
+            "content": (
+                f"Security posture configured. Compliance frameworks selected: "
+                f"{', '.join(selected) if selected else 'none detected'}"
+            ),
+        })
+
+        log_node_exit(state.migration_id, "discovery", "security_posture_config", {
+            "frameworks_selected": selected,
+            "count": len(selected),
+        }, (time.time() - t0) * 1000)
+        return state
+
+    except Exception as e:
+        log_error(state.migration_id, "SecurityPostureConfigError", str(e), "discovery")
+        logger.error(f"Security posture config failed: {e}")
+        state.errors.append(f"Security posture config error: {str(e)}")
+        state.compliance_frameworks_status = "failed"
+        return state
+
+
+# Phase 1.10 — Dependency Analysis Configuration
+def dependency_analysis_config(state: MigrationState) -> MigrationState:
+    """
+    Phase 1.10: Dependency Analysis Configuration.
+
+    Parses any user-specified dependency constraints (wave_size, excluded
+    services, force_sequential) and runs the DependencyAnalysisServer to
+    compute deployment waves for the discovered services.
+    """
+    t0 = time.time()
+    log_node_entry(state.migration_id, "discovery", "dependency_analysis_config", {
+        "discovered_services": len(state.discovery.discovered_services),
+        "existing_constraints": bool(state.dependency_constraints),
+    })
+    try:
+        # Build default constraints from context
+        ctx_lower = (state.user_context or "").lower()
+        wave_size = 5
+        if "small wave" in ctx_lower or "wave size 3" in ctx_lower:
+            wave_size = 3
+        elif "large wave" in ctx_lower or "wave size 10" in ctx_lower:
+            wave_size = 10
+
+        force_sequential = "sequential" in ctx_lower or "no parallel" in ctx_lower
+
+        constraints = {
+            "excluded_services": state.dependency_constraints.get("excluded_services", []),
+            "manual_overrides": state.dependency_constraints.get("manual_overrides", []),
+            "deployment_wave_size": state.dependency_constraints.get(
+                "deployment_wave_size", wave_size
+            ),
+            "force_sequential": state.dependency_constraints.get(
+                "force_sequential", force_sequential
+            ),
+        }
+
+        # Build a minimal Terraform representation from discovered services
+        service_to_tf = {
+            "compute": "oci_core_instance",
+            "storage": "oci_objectstorage_bucket",
+            "database": "oci_database_autonomous_database",
+            "network": "oci_core_vcn",
+            "load_balancer": "oci_load_balancer_load_balancer",
+            "container": "oci_containerengine_cluster",
+            "serverless": "oci_functions_application",
+            "cache": "oci_core_instance",
+            "cdn": "oci_objectstorage_bucket",
+        }
+
+        tf_modules: List[Dict[str, Any]] = []
+        for svc in state.discovery.discovered_services:
+            tf_type = service_to_tf.get(svc.resource_type, "oci_core_instance")
+            if tf_type not in (constraints.get("excluded_services") or []):
+                tf_modules.append({
+                    "name": svc.service_name.replace(" ", "_").lower(),
+                    "type": tf_type,
+                    "dependencies": svc.dependencies,
+                })
+
+        # Call DependencyAnalysisServer
+        analysis_result: Dict[str, Any] = {}
+        try:
+            from src.mcp_servers.dependency_analysis_server import dependency_analysis_server
+
+            # Step 1: Build graph via analyze_terraform_dependencies
+            server_modules = [
+                {"name": m["name"], "type": m["type"], "depends_on": m.get("dependencies", [])}
+                for m in tf_modules
+            ]
+            graph_result = dependency_analysis_server.analyze_terraform_dependencies(
+                modules=server_modules,
+            )
+            graph = graph_result.get("graph", {m["name"]: [] for m in server_modules})
+
+            # Step 2: Optimize waves
+            waves_result = dependency_analysis_server.optimize_deployment_waves(graph=graph)
+
+            # Step 3: Deployment timeline estimate
+            timeline_result = dependency_analysis_server.calculate_deployment_estimate(graph=graph)
+
+            # Step 4: Dependency diagram
+            diagram_result = dependency_analysis_server.generate_dependency_diagram(graph=graph)
+
+            raw_waves = waves_result.get("waves", [])
+
+            # Apply force_sequential override: split each wave into single-resource waves
+            if constraints["force_sequential"] and raw_waves:
+                flat = [r for w in raw_waves for r in w.get("resources", [])]
+                raw_waves = [{"wave": i + 1, "resources": [r]} for i, r in enumerate(flat)]
+
+            # Apply max wave size by splitting oversized waves
+            max_ws = constraints["deployment_wave_size"]
+            capped_waves: List[Dict[str, Any]] = []
+            wave_num = 1
+            for w in raw_waves:
+                resources = w.get("resources", [])
+                for chunk_start in range(0, max(len(resources), 1), max_ws):
+                    chunk = resources[chunk_start:chunk_start + max_ws]
+                    capped_waves.append({"wave": wave_num, "resources": chunk})
+                    wave_num += 1
+
+            analysis_result = {
+                "waves": capped_waves,
+                "total_waves": len(capped_waves),
+                "conflicts": [],
+                "diagram": diagram_result.get("diagram", ""),
+                "timeline_minutes": (
+                    timeline_result.get("total_parallel_seconds", 0) + 59
+                ) // 60,
+                "modules_analyzed": len(tf_modules),
+            }
+
+        except Exception as e:
+            logger.warning(f"DependencyAnalysisServer call failed, using fallback: {e}")
+            analysis_result = {
+                "waves": [{"wave": 1, "resources": [m["name"] for m in tf_modules]}],
+                "total_waves": 1,
+                "conflicts": [],
+                "diagram": "",
+                "timeline_minutes": len(tf_modules) * 5,
+                "modules_analyzed": len(tf_modules),
+            }
+
+        state.dependency_analysis = analysis_result
+        state.dependency_analysis_status = "completed"
+        state.applied_constraints = {
+            "wave_size": constraints["deployment_wave_size"],
+            "force_sequential": constraints["force_sequential"],
+            "excluded_count": len(constraints.get("excluded_services", [])),
+            "override_count": len(constraints.get("manual_overrides", [])),
+        }
+
+        state.messages.append({
+            "role": "system",
+            "content": (
+                f"Dependency analysis complete. "
+                f"{analysis_result['total_waves']} deployment waves planned, "
+                f"estimated {analysis_result['timeline_minutes']} minutes."
+            ),
+        })
+
+        log_node_exit(state.migration_id, "discovery", "dependency_analysis_config", {
+            "total_waves": analysis_result.get("total_waves", 0),
+            "timeline_minutes": analysis_result.get("timeline_minutes", 0),
+            "modules_analyzed": analysis_result.get("modules_analyzed", 0),
+        }, (time.time() - t0) * 1000)
+        return state
+
+    except Exception as e:
+        log_error(state.migration_id, "DependencyAnalysisConfigError", str(e), "discovery")
+        logger.error(f"Dependency analysis config failed: {e}")
+        state.errors.append(f"Dependency analysis config error: {str(e)}")
+        state.dependency_analysis_status = "failed"
+        return state
