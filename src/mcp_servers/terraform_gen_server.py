@@ -1009,11 +1009,20 @@ class TerraformGenServer:
         self._total_latency_ms += latency_ms
 
     # ------------------------------------------------------------------
-    def generate_provider(self, region: str = "us-ashburn-1") -> Dict[str, Any]:
-        """Return the provider.tf content."""
+    def generate_provider_config(self, region: str = "us-ashburn-1") -> Dict[str, Any]:
+        """Generate OCI provider and backend configuration (provider.tf).
+
+        Args:
+            region: OCI region identifier (default 'us-ashburn-1')
+        """
         t0 = time.time()
         self._record((time.time() - t0) * 1000)
         return {"file_name": "provider.tf", "content": PROVIDER_TF, "language": "hcl"}
+
+    # Backward-compatibility alias
+    def generate_provider(self, region: str = "us-ashburn-1") -> Dict[str, Any]:
+        """Return the provider.tf content (alias for generate_provider_config)."""
+        return self.generate_provider_config(region)
 
     # ------------------------------------------------------------------
     def generate_variables(self, variables: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -1128,6 +1137,713 @@ class TerraformGenServer:
             "file_count": len(files),
             "description": "3-tier web application: LB → App VMs → Autonomous DB",
         }
+
+    # ------------------------------------------------------------------
+    # Spec v4.1.0 — Named Module Generators
+    # ------------------------------------------------------------------
+
+    def generate_vcn_module(
+        self,
+        vcn_name: str = "main",
+        cidr_block: str = "10.0.0.0/16",
+        dns_label: str = "migration",
+        enable_ipv6: bool = False,
+    ) -> Dict[str, Any]:
+        """Generate Virtual Cloud Network (VCN) with Internet, NAT, and Service Gateways.
+
+        Args:
+            vcn_name: Logical name for the VCN resource
+            cidr_block: VCN CIDR block (default '10.0.0.0/16')
+            dns_label: DNS label for the VCN (no hyphens)
+            enable_ipv6: Whether to request an IPv6 CIDR (default False)
+        """
+        t0 = time.time()
+        content = textwrap.dedent(f"""\
+            # ── VCN ──────────────────────────────────────────────────────────────────
+            resource "oci_core_vcn" "{vcn_name}" {{
+              compartment_id  = var.compartment_ocid
+              display_name    = "${{var.project_name}}-vcn"
+              cidr_blocks     = ["{cidr_block}"]
+              dns_label       = "{dns_label}"
+              is_ipv6enabled  = {str(enable_ipv6).lower()}
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+              }}
+            }}
+
+            resource "oci_core_internet_gateway" "igw" {{
+              compartment_id = var.compartment_ocid
+              vcn_id         = oci_core_vcn.{vcn_name}.id
+              display_name   = "${{var.project_name}}-igw"
+              enabled        = true
+            }}
+
+            resource "oci_core_nat_gateway" "natgw" {{
+              compartment_id = var.compartment_ocid
+              vcn_id         = oci_core_vcn.{vcn_name}.id
+              display_name   = "${{var.project_name}}-natgw"
+            }}
+
+            resource "oci_core_service_gateway" "svcgw" {{
+              compartment_id = var.compartment_ocid
+              vcn_id         = oci_core_vcn.{vcn_name}.id
+              display_name   = "${{var.project_name}}-svcgw"
+              services {{
+                service_id = data.oci_core_services.all.services[0].id
+              }}
+            }}
+
+            data "oci_core_services" "all" {{
+              filter {{
+                name   = "name"
+                values = ["All .* Services In Oracle Services Network"]
+                regex  = true
+              }}
+            }}
+        """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "vcn.tf", "content": content, "resource_name": vcn_name, "cidr_block": cidr_block}
+
+    def generate_compute_module(
+        self,
+        instance_name: str = "app",
+        shape: str = "VM.Standard.E4.Flex",
+        ocpu: int = 2,
+        memory_gb: int = 16,
+        instance_count: int = 1,
+        subnet_ref: str = "app",
+        assign_public_ip: bool = False,
+        image_source: str = "Oracle Linux 8",
+    ) -> Dict[str, Any]:
+        """Generate OCI Compute Instance(s) with flexible shape configuration.
+
+        Args:
+            instance_name: Logical name for compute resource(s)
+            shape: OCI compute shape (default 'VM.Standard.E4.Flex')
+            ocpu: Number of OCPUs (default 2)
+            memory_gb: Memory in GB (default 16)
+            instance_count: Number of instances to create (default 1)
+            subnet_ref: Reference to subnet resource name
+            assign_public_ip: Whether to assign a public IP (default False)
+            image_source: Image source description for comment
+        """
+        t0 = time.time()
+        count_line = f"  count          = {instance_count}\n" if instance_count > 1 else ""
+        name_suffix = "[count.index]" if instance_count > 1 else ""
+        content = textwrap.dedent(f"""\
+            # ── COMPUTE — {instance_name} ─────────────────────────────────────────────
+            resource "oci_core_instance" "{instance_name}" {{
+            {count_line}  compartment_id      = var.compartment_ocid
+              availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
+              display_name        = "${{var.project_name}}-{instance_name}{name_suffix}"
+              shape               = "{shape}"
+
+              shape_config {{
+                ocpus         = {ocpu}
+                memory_in_gbs = {memory_gb}
+              }}
+
+              source_details {{
+                source_type = "image"
+                source_id   = data.oci_core_images.{instance_name}_image.images[0].id
+              }}
+
+              create_vnic_details {{
+                subnet_id        = oci_core_subnet.{subnet_ref}.id
+                assign_public_ip = {str(assign_public_ip).lower()}
+                display_name     = "${{var.project_name}}-{instance_name}-vnic"
+              }}
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+                "role"        = "{instance_name}"
+              }}
+            }}
+
+            data "oci_identity_availability_domains" "ads" {{
+              compartment_id = var.tenancy_ocid
+            }}
+
+            data "oci_core_images" "{instance_name}_image" {{
+              compartment_id           = var.compartment_ocid
+              operating_system         = "Oracle Linux"
+              operating_system_version = "8"
+              shape                    = "{shape}"
+              sort_by                  = "TIMECREATED"
+              sort_order               = "DESC"
+            }}
+        """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "compute.tf", "content": content, "instance_name": instance_name, "shape": shape, "instance_count": instance_count}
+
+    def generate_subnet_module(
+        self,
+        subnet_name: str = "app",
+        cidr_block: str = "10.0.2.0/24",
+        vcn_ref: str = "main",
+        route_table_ref: str = "private_rt",
+        security_list_ref: str = "app_sl",
+        prohibit_public_ip: bool = True,
+        dns_label: str = "app",
+    ) -> Dict[str, Any]:
+        """Generate OCI Subnet with security list and route table associations.
+
+        Args:
+            subnet_name: Logical name for the subnet resource
+            cidr_block: Subnet CIDR block
+            vcn_ref: Reference to VCN resource name
+            route_table_ref: Reference to route table resource name
+            security_list_ref: Reference to security list resource name
+            prohibit_public_ip: Whether to prohibit public IPs (private subnet)
+            dns_label: DNS label for the subnet
+        """
+        t0 = time.time()
+        content = textwrap.dedent(f"""\
+            # ── SUBNET — {subnet_name} ────────────────────────────────────────────────
+            resource "oci_core_subnet" "{subnet_name}" {{
+              compartment_id             = var.compartment_ocid
+              vcn_id                     = oci_core_vcn.{vcn_ref}.id
+              display_name               = "${{var.project_name}}-{subnet_name}-subnet"
+              cidr_block                 = "{cidr_block}"
+              dns_label                  = "{dns_label}"
+              prohibit_public_ip_on_vnic = {str(prohibit_public_ip).lower()}
+              route_table_id             = oci_core_route_table.{route_table_ref}.id
+              security_list_ids          = [oci_core_security_list.{security_list_ref}.id]
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+                "tier"        = "{subnet_name}"
+              }}
+            }}
+        """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "subnet.tf", "content": content, "subnet_name": subnet_name, "cidr_block": cidr_block}
+
+    def generate_load_balancer_module(
+        self,
+        lb_name: str = "main",
+        shape: str = "flexible",
+        min_bandwidth_mbps: int = 10,
+        max_bandwidth_mbps: int = 400,
+        subnet_ref: str = "public",
+        backend_port: int = 8080,
+        listener_port: int = 443,
+        health_check_path: str = "/health",
+    ) -> Dict[str, Any]:
+        """Generate OCI Load Balancer (flexible shape) with backend set and listener.
+
+        Args:
+            lb_name: Logical name for the load balancer resource
+            shape: LB shape ('flexible' or 'dynamic')
+            min_bandwidth_mbps: Minimum bandwidth in Mbps
+            max_bandwidth_mbps: Maximum bandwidth in Mbps
+            subnet_ref: Reference to public subnet resource name
+            backend_port: Backend instance port
+            listener_port: Frontend listener port
+            health_check_path: HTTP health check URL path
+        """
+        t0 = time.time()
+        content = textwrap.dedent(f"""\
+            # ── LOAD BALANCER — {lb_name} ──────────────────────────────────────────────
+            resource "oci_load_balancer_load_balancer" "{lb_name}" {{
+              compartment_id = var.compartment_ocid
+              display_name   = "${{var.project_name}}-lb"
+              shape          = "{shape}"
+              is_private     = false
+              subnet_ids     = [oci_core_subnet.{subnet_ref}.id]
+
+              shape_details {{
+                minimum_bandwidth_in_mbps = {min_bandwidth_mbps}
+                maximum_bandwidth_in_mbps = {max_bandwidth_mbps}
+              }}
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+              }}
+            }}
+
+            resource "oci_load_balancer_backend_set" "{lb_name}_bs" {{
+              load_balancer_id = oci_load_balancer_load_balancer.{lb_name}.id
+              name             = "${{var.project_name}}-backend-set"
+              policy           = "ROUND_ROBIN"
+
+              health_checker {{
+                protocol           = "HTTP"
+                port               = {backend_port}
+                url_path           = "{health_check_path}"
+                return_code        = 200
+                timeout_in_millis  = 3000
+                interval_in_millis = 10000
+              }}
+            }}
+
+            resource "oci_load_balancer_listener" "{lb_name}_listener" {{
+              load_balancer_id         = oci_load_balancer_load_balancer.{lb_name}.id
+              name                     = "listener-{listener_port}"
+              port                     = {listener_port}
+              protocol                 = "HTTP"
+              default_backend_set_name = oci_load_balancer_backend_set.{lb_name}_bs.name
+            }}
+        """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "load_balancer.tf", "content": content, "lb_name": lb_name}
+
+    def generate_database_module(
+        self,
+        db_name: str = "main",
+        db_type: str = "autonomous",
+        ocpu: int = 1,
+        storage_tb: int = 1,
+        workload: str = "OLTP",
+        subnet_ref: str = "db",
+        is_auto_scaling: bool = True,
+    ) -> Dict[str, Any]:
+        """Generate OCI Database Service configuration (Autonomous, Base DB, or MySQL).
+
+        Args:
+            db_name: Logical name for the database resource
+            db_type: Database type: 'autonomous', 'base_db', or 'mysql'
+            ocpu: Number of OCPUs
+            storage_tb: Storage in TB (for Autonomous)
+            workload: Workload type: 'OLTP' or 'DW'
+            subnet_ref: Reference to DB subnet resource name
+            is_auto_scaling: Enable auto-scaling (Autonomous only)
+        """
+        t0 = time.time()
+        if db_type == "autonomous":
+            content = textwrap.dedent(f"""\
+                # ── AUTONOMOUS DATABASE — {db_name} ──────────────────────────────────────
+                resource "oci_database_autonomous_database" "{db_name}" {{
+                  compartment_id           = var.compartment_ocid
+                  display_name             = "${{var.project_name}}-adb"
+                  db_name                  = "${{replace(var.project_name, "-", "")}}db"
+                  cpu_core_count           = {ocpu}
+                  data_storage_size_in_tbs = {storage_tb}
+                  db_workload              = "{workload}"
+                  is_auto_scaling_enabled  = {str(is_auto_scaling).lower()}
+                  admin_password           = var.adb_admin_password
+                  subnet_id                = oci_core_subnet.{subnet_ref}.id
+                  is_mtls_connection_required = true
+
+                  freeform_tags = {{
+                    "project"     = var.project_name
+                    "environment" = var.environment
+                  }}
+                }}
+
+                variable "adb_admin_password" {{
+                  description = "Autonomous Database admin password"
+                  type        = string
+                  sensitive   = true
+                }}
+            """)
+        elif db_type == "mysql":
+            content = textwrap.dedent(f"""\
+                # ── MYSQL HEATWAVE — {db_name} ─────────────────────────────────────────
+                resource "oci_mysql_mysql_db_system" "{db_name}" {{
+                  compartment_id      = var.compartment_ocid
+                  display_name        = "${{var.project_name}}-mysql"
+                  shape_name          = "MySQL.VM.Standard.E4.1.8GB"
+                  subnet_id           = oci_core_subnet.{subnet_ref}.id
+                  admin_username      = "admin"
+                  admin_password      = var.mysql_admin_password
+                  data_storage_size_in_gb = {storage_tb * 1024}
+
+                  freeform_tags = {{
+                    "project"     = var.project_name
+                    "environment" = var.environment
+                  }}
+                }}
+
+                variable "mysql_admin_password" {{
+                  description = "MySQL admin password"
+                  type        = string
+                  sensitive   = true
+                }}
+            """)
+        else:  # base_db
+            content = textwrap.dedent(f"""\
+                # ── BASE DATABASE SERVICE — {db_name} ────────────────────────────────────
+                resource "oci_database_db_system" "{db_name}" {{
+                  compartment_id      = var.compartment_ocid
+                  display_name        = "${{var.project_name}}-db-system"
+                  availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
+                  shape               = "VM.Standard.E4.Flex"
+                  subnet_id           = oci_core_subnet.{subnet_ref}.id
+                  hostname            = "${{var.project_name}}-db"
+                  ssh_public_keys     = [var.ssh_public_key]
+                  cpu_core_count      = {ocpu}
+                  data_storage_size_in_gb = {storage_tb * 1024}
+
+                  db_home {{
+                    db_version = "19.0.0.0"
+                    database {{
+                      db_name        = "${{replace(var.project_name, "-", "")}}db"
+                      admin_password = var.db_admin_password
+                    }}
+                  }}
+
+                  freeform_tags = {{
+                    "project"     = var.project_name
+                    "environment" = var.environment
+                  }}
+                }}
+
+                variable "db_admin_password" {{
+                  description = "Database admin password"
+                  type        = string
+                  sensitive   = true
+                }}
+            """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "database.tf", "content": content, "db_name": db_name, "db_type": db_type}
+
+    def generate_oke_module(
+        self,
+        cluster_name: str = "main",
+        kubernetes_version: str = "v1.29.1",
+        node_pool_name: str = "default",
+        node_shape: str = "VM.Standard.E4.Flex",
+        node_ocpu: int = 2,
+        node_memory_gb: int = 16,
+        node_count: int = 3,
+        endpoint_subnet_ref: str = "app",
+        lb_subnet_ref: str = "public",
+        worker_subnet_ref: str = "app",
+    ) -> Dict[str, Any]:
+        """Generate OKE cluster and node pool configuration.
+
+        Args:
+            cluster_name: Logical name for the OKE cluster resource
+            kubernetes_version: Kubernetes version string
+            node_pool_name: Node pool resource name
+            node_shape: Compute shape for worker nodes
+            node_ocpu: OCPUs per worker node
+            node_memory_gb: Memory per worker node in GB
+            node_count: Number of worker nodes
+            endpoint_subnet_ref: Reference to cluster endpoint subnet
+            lb_subnet_ref: Reference to load balancer subnet
+            worker_subnet_ref: Reference to worker node subnet
+        """
+        t0 = time.time()
+        content = textwrap.dedent(f"""\
+            # ── OKE CLUSTER — {cluster_name} ─────────────────────────────────────────
+            resource "oci_containerengine_cluster" "{cluster_name}" {{
+              compartment_id     = var.compartment_ocid
+              name               = "${{var.project_name}}-oke"
+              kubernetes_version = "{kubernetes_version}"
+              vcn_id             = oci_core_vcn.main.id
+
+              endpoint_config {{
+                subnet_id             = oci_core_subnet.{endpoint_subnet_ref}.id
+                is_public_ip_enabled  = false
+              }}
+
+              options {{
+                service_lb_subnet_ids = [oci_core_subnet.{lb_subnet_ref}.id]
+                add_ons {{
+                  is_kubernetes_dashboard_enabled = false
+                  is_tiller_enabled               = false
+                }}
+              }}
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+              }}
+            }}
+
+            # ── OKE NODE POOL — {node_pool_name} ──────────────────────────────────────
+            resource "oci_containerengine_node_pool" "{node_pool_name}" {{
+              compartment_id     = var.compartment_ocid
+              cluster_id         = oci_containerengine_cluster.{cluster_name}.id
+              name               = "${{var.project_name}}-node-pool"
+              kubernetes_version = "{kubernetes_version}"
+              node_shape         = "{node_shape}"
+
+              node_shape_config {{
+                ocpus         = {node_ocpu}
+                memory_in_gbs = {node_memory_gb}
+              }}
+
+              node_config_details {{
+                size = {node_count}
+                placement_configs {{
+                  availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
+                  subnet_id           = oci_core_subnet.{worker_subnet_ref}.id
+                }}
+              }}
+
+              initial_node_labels {{
+                key   = "app"
+                value = var.project_name
+              }}
+            }}
+        """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "oke.tf", "content": content, "cluster_name": cluster_name}
+
+    def generate_security_module(
+        self,
+        sl_name: str = "app_sl",
+        vcn_ref: str = "main",
+        ingress_cidrs: Optional[List[str]] = None,
+        ingress_ports: Optional[List[int]] = None,
+        nsg_name: str = "app_nsg",
+    ) -> Dict[str, Any]:
+        """Generate Security Lists and Network Security Groups (NSGs).
+
+        Args:
+            sl_name: Logical name for the security list resource
+            vcn_ref: Reference to VCN resource name
+            ingress_cidrs: List of allowed ingress CIDR blocks
+            ingress_ports: List of allowed ingress TCP ports
+            nsg_name: Logical name for the NSG resource
+        """
+        t0 = time.time()
+        cidrs = ingress_cidrs or ["10.0.0.0/8"]
+        ports = ingress_ports or [8080]
+
+        ingress_rules = "\n".join([
+            f"""\
+              ingress_security_rules {{
+                protocol = "6"
+                source   = "{cidr}"
+                tcp_options {{ min = {port}; max = {port} }}
+              }}"""
+            for cidr in cidrs for port in ports
+        ])
+
+        content = textwrap.dedent(f"""\
+            # ── SECURITY LIST — {sl_name} ─────────────────────────────────────────────
+            resource "oci_core_security_list" "{sl_name}" {{
+              compartment_id = var.compartment_ocid
+              vcn_id         = oci_core_vcn.{vcn_ref}.id
+              display_name   = "${{var.project_name}}-{sl_name}"
+
+              egress_security_rules {{
+                protocol    = "all"
+                destination = "0.0.0.0/0"
+              }}
+            {ingress_rules}
+            }}
+
+            # ── NETWORK SECURITY GROUP — {nsg_name} ────────────────────────────────────
+            resource "oci_core_network_security_group" "{nsg_name}" {{
+              compartment_id = var.compartment_ocid
+              vcn_id         = oci_core_vcn.{vcn_ref}.id
+              display_name   = "${{var.project_name}}-{nsg_name}"
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+              }}
+            }}
+        """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "security.tf", "content": content, "sl_name": sl_name, "nsg_name": nsg_name}
+
+    def generate_route_table_module(
+        self,
+        rt_name: str = "private_rt",
+        vcn_ref: str = "main",
+        gateway_ref: str = "natgw",
+        gateway_type: str = "nat",
+        destination_cidr: str = "0.0.0.0/0",
+    ) -> Dict[str, Any]:
+        """Generate OCI Route Table with gateway rules.
+
+        Args:
+            rt_name: Logical name for the route table resource
+            vcn_ref: Reference to VCN resource name
+            gateway_ref: Reference to gateway resource name
+            gateway_type: Gateway type: 'internet', 'nat', or 'service'
+            destination_cidr: Route destination CIDR
+        """
+        t0 = time.time()
+        if gateway_type == "internet":
+            gw_resource = f"oci_core_internet_gateway.{gateway_ref}.id"
+        elif gateway_type == "service":
+            gw_resource = f"oci_core_service_gateway.{gateway_ref}.id"
+            destination_cidr = "all-iad-services-in-oracle-services-network"
+        else:
+            gw_resource = f"oci_core_nat_gateway.{gateway_ref}.id"
+
+        dest_type_line = '    destination_type  = "SERVICE_CIDR_BLOCK"' if gateway_type == "service" else ""
+
+        content = textwrap.dedent(f"""\
+            # ── ROUTE TABLE — {rt_name} ────────────────────────────────────────────────
+            resource "oci_core_route_table" "{rt_name}" {{
+              compartment_id = var.compartment_ocid
+              vcn_id         = oci_core_vcn.{vcn_ref}.id
+              display_name   = "${{var.project_name}}-{rt_name}"
+
+              route_rules {{
+                network_entity_id = {gw_resource}
+                destination       = "{destination_cidr}"
+            {dest_type_line}
+              }}
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+              }}
+            }}
+        """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "route_table.tf", "content": content, "rt_name": rt_name}
+
+    def generate_iam_module(
+        self,
+        compartment_name: str = "workload",
+        group_name: str = "migration_operators",
+        policy_statements: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Generate IAM policies, groups, and compartments.
+
+        Args:
+            compartment_name: Sub-compartment name for the workload
+            group_name: IAM group name for operators
+            policy_statements: List of IAM policy statements
+                               (defaults to a set of migration operator permissions)
+        """
+        t0 = time.time()
+        statements = policy_statements or [
+            f"Allow group {group_name} to manage all-resources in compartment ${{var.project_name}}-{compartment_name}",
+            f"Allow group {group_name} to read all-resources in tenancy",
+        ]
+        stmt_lines = "\n".join([f'    "{s}",' for s in statements])
+
+        content = textwrap.dedent(f"""\
+            # ── IAM COMPARTMENT — {compartment_name} ──────────────────────────────────
+            resource "oci_identity_compartment" "{compartment_name}" {{
+              parent_id    = var.compartment_ocid
+              name         = "${{var.project_name}}-{compartment_name}"
+              description  = "Compartment for ${{var.project_name}} {compartment_name} workloads"
+              enable_delete = false
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+              }}
+            }}
+
+            # ── IAM GROUP — {group_name} ────────────────────────────────────────────────
+            resource "oci_identity_group" "{group_name}" {{
+              name        = "{group_name}"
+              description = "Operators for ${{var.project_name}} migration"
+            }}
+
+            # ── IAM POLICY ────────────────────────────────────────────────────────────
+            resource "oci_identity_policy" "{compartment_name}_policy" {{
+              compartment_id = var.tenancy_ocid
+              name           = "${{var.project_name}}-{compartment_name}-policy"
+              description    = "Policies for {compartment_name} compartment"
+              statements = [
+            {stmt_lines}
+              ]
+            }}
+        """)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "iam.tf", "content": content, "compartment_name": compartment_name, "group_name": group_name}
+
+    def generate_object_storage_module(
+        self,
+        bucket_name: str = "migration",
+        storage_tier: str = "Standard",
+        versioning: str = "Enabled",
+        lifecycle_days: int = 90,
+        access_type: str = "NoPublicAccess",
+    ) -> Dict[str, Any]:
+        """Generate OCI Object Storage bucket with lifecycle policy.
+
+        Args:
+            bucket_name: Bucket resource name (also used as display name)
+            storage_tier: Storage tier ('Standard' or 'Archive')
+            versioning: Versioning state ('Enabled' or 'Disabled')
+            lifecycle_days: Days before objects are archived (0 = no lifecycle rule)
+            access_type: Bucket access type ('NoPublicAccess', 'ObjectRead', etc.)
+        """
+        t0 = time.time()
+        lifecycle_block = ""
+        if lifecycle_days > 0:
+            lifecycle_block = textwrap.dedent(f"""\
+
+                resource "oci_objectstorage_object_lifecycle_policy" "{bucket_name}_lifecycle" {{
+                  namespace = data.oci_objectstorage_namespace.ns.namespace
+                  bucket    = oci_objectstorage_bucket.{bucket_name}.name
+
+                  rules {{
+                    name         = "archive-old-objects"
+                    action       = "ARCHIVE"
+                    is_enabled   = true
+                    target       = "objects"
+                    time_amount  = {lifecycle_days}
+                    time_unit    = "DAYS"
+                  }}
+                }}
+            """)
+
+        content = textwrap.dedent(f"""\
+            # ── OBJECT STORAGE — {bucket_name} ─────────────────────────────────────────
+            data "oci_objectstorage_namespace" "ns" {{
+              compartment_id = var.compartment_ocid
+            }}
+
+            resource "oci_objectstorage_bucket" "{bucket_name}" {{
+              compartment_id = var.compartment_ocid
+              namespace      = data.oci_objectstorage_namespace.ns.namespace
+              name           = "${{var.project_name}}-{bucket_name}"
+              storage_tier   = "{storage_tier}"
+              versioning     = "{versioning}"
+              access_type    = "{access_type}"
+
+              freeform_tags = {{
+                "project"     = var.project_name
+                "environment" = var.environment
+              }}
+            }}
+            {lifecycle_block}""")
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "object_storage.tf", "content": content, "bucket_name": bucket_name}
+
+    def generate_outputs(
+        self,
+        resource_refs: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Generate Terraform outputs file for common OCI resources.
+
+        Args:
+            resource_refs: Dict of {output_name: terraform_expression} overrides.
+                           Defaults to common 3-tier outputs if not provided.
+        """
+        t0 = time.time()
+        defaults = {
+            "vcn_id": "oci_core_vcn.main.id",
+            "load_balancer_public_ip": "oci_load_balancer_load_balancer.main.ip_address_details[0].ip_address",
+            "adb_connection_strings": "oci_database_autonomous_database.main.connection_strings",
+            "oke_cluster_id": "oci_containerengine_cluster.main.id",
+        }
+        refs = {**defaults, **(resource_refs or {})}
+
+        lines = ["# ── OUTPUTS ──────────────────────────────────────────────────────────────"]
+        for out_name, expression in refs.items():
+            sensitive = "sensitive   = true\n" if "password" in out_name or "connection" in out_name else ""
+            lines.append(textwrap.dedent(f"""\
+                output "{out_name}" {{
+                  description = "Auto-generated output for {out_name}"
+                  value       = {expression}
+                  {sensitive}}}
+            """))
+
+        content = "\n".join(lines)
+        self._record((time.time() - t0) * 1000)
+        return {"file_name": "outputs.tf", "content": content, "output_count": len(refs)}
 
     # ------------------------------------------------------------------
     def list_resource_types(self) -> Dict[str, Any]:

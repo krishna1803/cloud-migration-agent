@@ -653,9 +653,30 @@ class MappingServer:
         return result
 
     # ------------------------------------------------------------------
-    # Legacy compatibility alias
+    # Spec v4.1.0 named mapping tools
     def aws_to_oci(self, aws_service: str) -> Dict[str, Any]:
+        """Map a single AWS service to its OCI equivalent (65-entry YAML KB).
+
+        Args:
+            aws_service: AWS service name (e.g. 'EC2', 'RDS', 'S3', 'EKS')
+        """
         return self.map_service(aws_service, "AWS")
+
+    def azure_to_oci(self, azure_service: str) -> Dict[str, Any]:
+        """Map a single Azure service to its OCI equivalent (36-entry YAML KB).
+
+        Args:
+            azure_service: Azure service name (e.g. 'Virtual Machines', 'Azure SQL', 'AKS')
+        """
+        return self.map_service(azure_service, "Azure")
+
+    def gcp_to_oci(self, gcp_service: str) -> Dict[str, Any]:
+        """Map a single GCP service to its OCI equivalent (44-entry YAML KB).
+
+        Args:
+            gcp_service: GCP service name (e.g. 'Compute Engine', 'Cloud SQL', 'GKE')
+        """
+        return self.map_service(gcp_service, "GCP")
 
     # ------------------------------------------------------------------
     def bulk_map(

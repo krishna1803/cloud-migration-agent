@@ -11,12 +11,18 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 # MCP server singletons
-from src.mcp_servers.mapping_server   import mapping_server
-from src.mcp_servers.sizing_server    import sizing_server
-from src.mcp_servers.pricing_server   import pricing_server
-from src.mcp_servers.refarch_server   import refarch_server
-from src.mcp_servers.terraform_gen_server import terraform_gen_server
-from src.mcp_servers.oci_rm_server    import oci_rm_server
+from src.mcp_servers.mapping_server         import mapping_server
+from src.mcp_servers.sizing_server          import sizing_server
+from src.mcp_servers.pricing_server         import pricing_server
+from src.mcp_servers.refarch_server         import refarch_server
+from src.mcp_servers.terraform_gen_server   import terraform_gen_server
+from src.mcp_servers.oci_rm_server          import oci_rm_server
+from src.mcp_servers.oracle_archhub_server  import oracle_archhub_server
+from src.mcp_servers.oracle_livelabs_server import oracle_livelabs_server
+from src.mcp_servers.terraform_validator_server import terraform_validator_server
+from src.mcp_servers.dependency_analysis_server import dependency_analysis_server
+from src.mcp_servers.project_export_server  import project_export_server
+from src.mcp_servers.deployment_monitor_server import deployment_monitor_server
 
 
 def _j(obj: Any) -> str:
@@ -469,12 +475,378 @@ class ShapeCatalogueTool(BaseTool):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ORACLE ARCHITECTURE HUB TOOL
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ArchHubSearchInput(BaseModel):
+    query: str = Field(description="Natural-language search string (e.g. 'three-tier web app', 'kubernetes migration')")
+    category: Optional[str] = Field(default=None, description="Category filter (e.g. 'Web Application', 'Kubernetes', 'Database Migration')")
+    workload_type: Optional[str] = Field(default=None, description="Workload hint (e.g. 'database', 'microservices', 'analytics')")
+    max_results: int = Field(default=5, description="Maximum results to return")
+
+
+class ArchHubSearchTool(BaseTool):
+    name: str = "archhub_search"
+    description: str = (
+        "Search Oracle Architecture Hub for reference architectures matching a workload description. "
+        "Returns architecture titles, categories, services used, Terraform module sources, and documentation URLs. "
+        "Use this in Phase 2 Analysis to discover Oracle reference patterns for the target architecture."
+    )
+    args_schema: Type[BaseModel] = ArchHubSearchInput
+    return_direct: bool = False
+
+    def _run(self, query: str, category: Optional[str] = None, workload_type: Optional[str] = None, max_results: int = 5) -> str:
+        result = oracle_archhub_server.search(query, category, workload_type, max_results)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+class ArchHubExtractInput(BaseModel):
+    arch_id: str = Field(description="Architecture ID from archhub_search results (e.g. 'arch-001')")
+
+
+class ArchHubExtractTool(BaseTool):
+    name: str = "archhub_extract_architecture"
+    description: str = (
+        "Extract structured component details from a specific Oracle Architecture Hub pattern. "
+        "Returns components, services, migration suitability, and Terraform module reference. "
+        "Use after archhub_search to get full architecture details."
+    )
+    args_schema: Type[BaseModel] = ArchHubExtractInput
+    return_direct: bool = False
+
+    def _run(self, arch_id: str) -> str:
+        result = oracle_archhub_server.extract_architecture(arch_id)
+        return _j(result)
+
+    async def _arun(self, arch_id: str) -> str:
+        return self._run(arch_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ORACLE LIVE LABS TOOL
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LiveLabsSearchInput(BaseModel):
+    query: str = Field(description="Search string for workshops (e.g. 'kubernetes migration', 'terraform iac')")
+    focus_area: Optional[str] = Field(default=None, description="Focus area filter (e.g. 'Cloud Migration', 'Database', 'Kubernetes')")
+    level: Optional[str] = Field(default=None, description="Workshop level: 'Beginner', 'Intermediate', or 'Advanced'")
+    max_results: int = Field(default=5, description="Maximum workshops to return")
+
+
+class LiveLabsSearchTool(BaseTool):
+    name: str = "livelabs_search"
+    description: str = (
+        "Search Oracle Live Labs for hands-on workshops relevant to the migration. "
+        "Returns workshop titles, focus areas, duration, lab steps, and workshop URLs. "
+        "Use in Phase 2 Analysis to recommend learning resources and migration workshops."
+    )
+    args_schema: Type[BaseModel] = LiveLabsSearchInput
+    return_direct: bool = False
+
+    def _run(self, query: str, focus_area: Optional[str] = None, level: Optional[str] = None, max_results: int = 5) -> str:
+        result = oracle_livelabs_server.search(query, focus_area, level, max_results)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TERRAFORM VALIDATOR TOOL
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TerraformValidateInput(BaseModel):
+    hcl_content: str = Field(description="Terraform HCL content string to validate")
+    filename: str = Field(default="main.tf", description="Source filename for error messages")
+
+
+class TerraformValidateTool(BaseTool):
+    name: str = "terraform_validate_syntax"
+    description: str = (
+        "Validate Terraform HCL syntax by checking brace balance, required blocks, and resource extraction. "
+        "Returns is_valid flag, errors, warnings, and resource summary. "
+        "Use in Phase 5 Implementation after generating Terraform code."
+    )
+    args_schema: Type[BaseModel] = TerraformValidateInput
+    return_direct: bool = False
+
+    def _run(self, hcl_content: str, filename: str = "main.tf") -> str:
+        result = terraform_validator_server.validate_syntax(hcl_content, filename)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+class TerraformSecurityScanInput(BaseModel):
+    hcl_content: str = Field(description="Terraform HCL content to security scan")
+    filename: str = Field(default="main.tf", description="Source filename for finding messages")
+    severity_filter: Optional[str] = Field(default=None, description="Filter findings by severity: 'HIGH', 'MEDIUM', or 'LOW'")
+
+
+class TerraformSecurityScanTool(BaseTool):
+    name: str = "terraform_security_scan"
+    description: str = (
+        "Scan Terraform HCL for OCI security policy violations: open SSH/RDP ports, "
+        "public storage buckets, hardcoded credentials, missing tags, and more. "
+        "Returns findings with severity and remediation recommendations. "
+        "Use in Phase 5 Implementation to validate generated code before deployment."
+    )
+    args_schema: Type[BaseModel] = TerraformSecurityScanInput
+    return_direct: bool = False
+
+    def _run(self, hcl_content: str, filename: str = "main.tf", severity_filter: Optional[str] = None) -> str:
+        result = terraform_validator_server.security_scan(hcl_content, filename, severity_filter)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPENDENCY ANALYSIS TOOLS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AnalyzeDepsInput(BaseModel):
+    modules: List[Dict[str, Any]] = Field(
+        description=(
+            "List of module descriptors. Each dict has: "
+            "'name' (str), 'type' (OCI resource type), 'depends_on' (list of dependency names)"
+        )
+    )
+    hcl_content: Optional[str] = Field(default=None, description="Optional raw HCL to auto-extract dependencies")
+
+
+class AnalyzeDependenciesTool(BaseTool):
+    name: str = "analyze_terraform_dependencies"
+    description: str = (
+        "Build a dependency graph from Terraform module definitions or raw HCL. "
+        "Returns the dependency graph, node metadata, and deployment time estimates. "
+        "Use before optimize_deployment_waves to understand resource ordering."
+    )
+    args_schema: Type[BaseModel] = AnalyzeDepsInput
+    return_direct: bool = False
+
+    def _run(self, modules: List[Dict[str, Any]], hcl_content: Optional[str] = None) -> str:
+        result = dependency_analysis_server.analyze_terraform_dependencies(modules, hcl_content)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+class OptimizeWavesInput(BaseModel):
+    graph: Dict[str, List[str]] = Field(description="Dependency graph {node_name: [dependency_names]}")
+    node_times: Optional[Dict[str, int]] = Field(default=None, description="Per-node deploy time overrides in seconds")
+
+
+class OptimizeDeploymentWavesTool(BaseTool):
+    name: str = "optimize_deployment_waves"
+    description: str = (
+        "Compute optimal parallel deployment waves using topological sort. "
+        "Resources in the same wave can be deployed in parallel. "
+        "Returns ordered waves with timing estimates for the deployment plan. "
+        "Use in Phase 5 Implementation to optimize deployment order."
+    )
+    args_schema: Type[BaseModel] = OptimizeWavesInput
+    return_direct: bool = False
+
+    def _run(self, graph: Dict[str, List[str]], node_times: Optional[Dict[str, int]] = None) -> str:
+        result = dependency_analysis_server.optimize_deployment_waves(graph, node_times)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+class GenerateDiagramInput(BaseModel):
+    graph: Dict[str, List[str]] = Field(description="Dependency graph {node_name: [dependency_names]}")
+    title: str = Field(default="OCI Deployment Dependencies", description="Diagram title")
+
+
+class GenerateDependencyDiagramTool(BaseTool):
+    name: str = "generate_dependency_diagram"
+    description: str = (
+        "Generate a Mermaid LR diagram visualizing Terraform resource dependencies. "
+        "Returns the diagram string for display in the UI or inclusion in deliverables. "
+        "Use in Phase 3 Design or Phase 5 Implementation."
+    )
+    args_schema: Type[BaseModel] = GenerateDiagramInput
+    return_direct: bool = False
+
+    def _run(self, graph: Dict[str, List[str]], title: str = "OCI Deployment Dependencies") -> str:
+        result = dependency_analysis_server.generate_dependency_diagram(graph, title)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROJECT EXPORT TOOL
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ExportProjectInput(BaseModel):
+    project_name: str = Field(description="Project name used for the archive filename")
+    files: Dict[str, str] = Field(description="Dict of {filename: content} for all Terraform files")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional metadata to include in the manifest")
+
+
+class ExportProjectTool(BaseTool):
+    name: str = "export_project_as_zip"
+    description: str = (
+        "Export a Terraform project as a base64-encoded ZIP archive for download. "
+        "Returns export_id, zip_base64, and file manifest for tracking. "
+        "Use in Phase 5 Implementation when user selects 'Export for manual editing'."
+    )
+    args_schema: Type[BaseModel] = ExportProjectInput
+    return_direct: bool = False
+
+    def _run(self, project_name: str, files: Dict[str, str], metadata: Optional[Dict[str, Any]] = None) -> str:
+        result = project_export_server.export_as_zip(project_name, files, metadata)
+        # Omit the large zip_base64 from LLM response (too large for context)
+        result_trimmed = {k: v for k, v in result.items() if k != "zip_base64"}
+        result_trimmed["zip_available"] = True
+        return _j(result_trimmed)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+class ImportProjectInput(BaseModel):
+    export_id: str = Field(description="The export_id from a previous export_project_as_zip call")
+    modified_files: Dict[str, str] = Field(description="Dict of {filename: content} with the modified project files")
+
+
+class ImportProjectTool(BaseTool):
+    name: str = "import_project"
+    description: str = (
+        "Import a modified Terraform project, detecting changes vs. the original export. "
+        "Returns change summary (added/modified/deleted/unchanged files). "
+        "Use in Phase 5 Implementation after user has edited the exported project."
+    )
+    args_schema: Type[BaseModel] = ImportProjectInput
+    return_direct: bool = False
+
+    def _run(self, export_id: str, modified_files: Dict[str, str]) -> str:
+        result = project_export_server.import_project(export_id, modified_files)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOYMENT MONITOR TOOLS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PreDeploymentValidationInput(BaseModel):
+    compartment_id: str = Field(description="Target OCI compartment OCID")
+    region: str = Field(default="us-ashburn-1", description="Target OCI region")
+    planned_resources: Optional[List[str]] = Field(default=None, description="List of resource types to be deployed")
+
+
+class PreDeploymentValidationTool(BaseTool):
+    name: str = "validate_pre_deployment"
+    description: str = (
+        "Validate OCI environment readiness before deploying: checks connectivity, "
+        "IAM permissions, service quotas, and VCN CIDR conflicts. "
+        "Returns pass/fail per check and blocking failures. "
+        "Use at the start of Phase 6 Deployment."
+    )
+    args_schema: Type[BaseModel] = PreDeploymentValidationInput
+    return_direct: bool = False
+
+    def _run(self, compartment_id: str, region: str = "us-ashburn-1", planned_resources: Optional[List[str]] = None) -> str:
+        result = deployment_monitor_server.validate_pre_deployment(compartment_id, region, planned_resources)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+class PostDeploymentValidationInput(BaseModel):
+    deployment_id: str = Field(description="Migration/deployment ID")
+    stack_id: Optional[str] = Field(default=None, description="OCI Resource Manager stack OCID")
+
+
+class PostDeploymentValidationTool(BaseTool):
+    name: str = "validate_post_deployment"
+    description: str = (
+        "Validate deployed OCI infrastructure: checks resource creation, compute health, "
+        "network connectivity, load balancer backends, and security configuration. "
+        "Returns overall health status. Use after Terraform apply in Phase 6."
+    )
+    args_schema: Type[BaseModel] = PostDeploymentValidationInput
+    return_direct: bool = False
+
+    def _run(self, deployment_id: str, stack_id: Optional[str] = None) -> str:
+        result = deployment_monitor_server.validate_post_deployment(deployment_id, stack_id)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+class MonitorDeploymentInput(BaseModel):
+    deployment_id: str = Field(description="Deployment/migration ID for tracking")
+    job_id: Optional[str] = Field(default=None, description="OCI Resource Manager job OCID")
+
+
+class MonitorDeploymentTool(BaseTool):
+    name: str = "monitor_deployment"
+    description: str = (
+        "Monitor active OCI deployment progress: tracks resource creation, "
+        "completion percentage, ETA, and current operation. "
+        "Use during Phase 6 Deployment to track Terraform apply progress."
+    )
+    args_schema: Type[BaseModel] = MonitorDeploymentInput
+    return_direct: bool = False
+
+    def _run(self, deployment_id: str, job_id: Optional[str] = None) -> str:
+        result = deployment_monitor_server.monitor_deployment(deployment_id, job_id)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+class GenerateDeploymentReportInput(BaseModel):
+    deployment_id: str = Field(description="Deployment/migration ID")
+    migration_name: str = Field(description="Human-readable migration project name")
+    source_cloud: str = Field(default="AWS", description="Source cloud provider")
+    target_region: str = Field(default="us-ashburn-1", description="OCI target region")
+
+
+class GenerateDeploymentReportTool(BaseTool):
+    name: str = "generate_deployment_report"
+    description: str = (
+        "Generate a comprehensive post-deployment summary report with executive summary, "
+        "infrastructure inventory, validation results, and next steps. "
+        "Use at the end of Phase 6 Deployment to produce final deliverables."
+    )
+    args_schema: Type[BaseModel] = GenerateDeploymentReportInput
+    return_direct: bool = False
+
+    def _run(self, deployment_id: str, migration_name: str, source_cloud: str = "AWS", target_region: str = "us-ashburn-1") -> str:
+        result = deployment_monitor_server.generate_deployment_report(deployment_id, migration_name, source_cloud, target_region)
+        return _j(result)
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONVENIENCE FACTORY
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_all_tools() -> List[BaseTool]:
     """Return all OCI migration LangChain tools as a list."""
     return [
+        # Existing tools
         ServiceMappingTool(),
         ResourceSizingTool(),
         PricingEstimationTool(),
@@ -489,4 +861,19 @@ def get_all_tools() -> List[BaseTool]:
         GetJobTool(),
         GetJobLogsTool(),
         ShapeCatalogueTool(),
+        # New tools (v4.1.0)
+        ArchHubSearchTool(),
+        ArchHubExtractTool(),
+        LiveLabsSearchTool(),
+        TerraformValidateTool(),
+        TerraformSecurityScanTool(),
+        AnalyzeDependenciesTool(),
+        OptimizeDeploymentWavesTool(),
+        GenerateDependencyDiagramTool(),
+        ExportProjectTool(),
+        ImportProjectTool(),
+        PreDeploymentValidationTool(),
+        PostDeploymentValidationTool(),
+        MonitorDeploymentTool(),
+        GenerateDeploymentReportTool(),
     ]
